@@ -1,0 +1,66 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 4?
+    (plan mode) -- produce a plan for Step 04 (design/implementation/04-tui-core.md).
+
+[2] Can we explore using the charm v2 stack? That may be a miss from the
+    original design.
+    -- Researched the v2 line; found it released and coherent but on charm.land
+    vanity import paths. Revised the plan to adopt v2. Plan approved.
+
+[3] /review -- run a full multi-pass local review (functional, code-quality,
+    ADR-compliance, performance reviewers in parallel) on the working-tree
+    changes, aggregate by severity, offer to fix.
+
+[4] AskUserQuestion answered: "Fix all" -- address actionable [1][2] plus every
+    MEDIUM/LOW finding [3]-[8].
+
+[5] /trueup -- commit the work, add the session prompts via git notes, push, and
+    open a PR via the GitHub CLI whose description reflects a full diff against
+    the base branch.
+
+Work performed
+--------------
+- Implemented the render pipeline (internal/render: glamour/v2 +
+  html-to-markdown/v2, dark/light via lipgloss.HasDarkBackground, width-aware),
+  the TUI (internal/ui: styles, keys, feed list + delegate, reader viewport,
+  messages, root app Model), and the launch wiring (cmd/renomail: runTUI +
+  buildTUI; dispatch defaults to the TUI; dump retained).
+- Adopted the Charm v2 stack on charm.land/* paths; View() tea.View with
+  AltScreen field, tea.KeyPressMsg, bubbles/v2/key.Matches.
+- loadBodyCmd hydrates the body via store.GetBody before rendering (store.Query
+  is body-less) -- the lazy-load seam Gmail (step 06) reuses.
+- Deps added: charm.land/{bubbletea,bubbles,lipgloss,glamour}/v2,
+  html-to-markdown/v2, dustin/go-humanize, mattn/go-runewidth (direct);
+  charm/x/exp/teatest/v2 (test-only).
+- Recorded the v2 deviation in design/implementation/04-tui-core.md and a one-line
+  stack note in DESIGN.md §6; ticked the Done checklist.
+
+Review (one fix iteration)
+--------------------------
+- First pass: zero CRITICAL; two HIGH performance findings plus MEDIUM/LOW.
+  Fixed all 8:
+  1/2. feed delegate.Render no longer formats per frame -- makeRow precomputes
+       kind/source/age at SetItems; Render uses a pre-sized strings.Builder.
+  3.   Stale-body race closed -- Model.openID guards bodyLoadedMsg.
+  4.   Theme built once in New() and cached on the model (was rebuilt per frame).
+  5.   Display-width-correct columns via go-runewidth; truncate doc fixed.
+  6.   Removed the unused KindTag style.
+  7.   Reader cleared on open so the prior body cannot flash under the new header.
+  8.   Documented that keys.Top/Bottom are help-only (motion owned by the list).
+- Re-review: functional APPROVED, quality PASS, performance PASS, ADR
+  NOT-APPLICABLE. Remaining LOW items (b.Grow hint, age frozen at load time,
+  per-row lipgloss alloc) left intentionally per reviewer guidance.
+
+Decisions
+---------
+- Adopt Charm v2 (the design doc's v1 snippets predated v2 GA); v2 modules import
+  from charm.land, not github.com/charmbracelet.
+- Relative age is precomputed at SetItems time, not per render; it is frozen while
+  the TUI is open (deliberate trade-off; refresh later on the SetItems path, never
+  in the hot Render path).
+- runTUI split into testable buildTUI + launch, with injectable ProgramOptions so
+  the launch path is covered headlessly.
+- Filter/search, m/M read toggles, open-in-browser, and the background sync engine
+  remain deferred (steps 05/07).
