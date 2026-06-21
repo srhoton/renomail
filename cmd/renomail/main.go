@@ -38,8 +38,13 @@ func dispatch(ctx context.Context, args []string, w io.Writer) error {
 		return err
 	}
 
-	if len(args) > 0 && args[0] == "dump" {
-		return runDump(ctx, cfg, paths, w)
+	if len(args) > 0 {
+		switch args[0] {
+		case "dump":
+			return runDump(ctx, cfg, paths, w)
+		case "auth":
+			return runAuth(ctx, paths, authAccount(args[1:]))
+		}
 	}
 	return runTUI(cfg, paths)
 }

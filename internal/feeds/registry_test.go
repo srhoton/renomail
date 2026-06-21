@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/srhoton/renomail/internal/config"
@@ -135,5 +136,74 @@ func TestBuildRSSProviders_badOPMLPath_errors(t *testing.T) {
 	cfg := config.Config{OPML: []config.OPMLSource{{Path: filepath.Join(t.TempDir(), "missing.opml")}}}
 	if _, err := BuildRSSProviders(ctx, cfg, st, nil); err == nil {
 		t.Fatal("BuildRSSProviders() error = nil, want error for missing OPML")
+	}
+}
+
+// gmailTestPaths writes a credentials.json and returns Paths rooted at a temp
+// config dir, so BuildGmailProviders can construct providers without a network or
+// real OAuth client. The credentials are structurally valid but dummy.
+func gmailTestPaths(t *testing.T) config.Paths {
+	t.Helper()
+	dir := t.TempDir()
+	creds := `{"installed":{"client_id":"cid.apps.googleusercontent.com",` +
+		`"client_secret":"secret","redirect_uris":["http://localhost"],` +
+		`"auth_uri":"https://accounts.google.com/o/oauth2/auth",` +
+		`"token_uri":"https://oauth2.googleapis.com/token"}}`
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(credPath, []byte(creds), 0o600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+	return config.Paths{ConfigDir: dir, Credentials: credPath}
+}
+
+func TestBuildGmailProviders_noAccounts_returnsEmpty(t *testing.T) {
+	providers, warns := BuildGmailProviders(context.Background(), config.Config{}, gmailTestPaths(t))
+	if len(providers) != 0 || len(warns) != 0 {
+		t.Errorf("empty config: providers=%d warns=%d, want 0/0", len(providers), len(warns))
+	}
+}
+
+func TestBuildGmailProviders_missingToken_skipsWithWarning(t *testing.T) {
+	cfg := config.Config{Gmail: []config.GmailAccount{{Account: "nobody@example.com"}}}
+	providers, warns := BuildGmailProviders(context.Background(), cfg, gmailTestPaths(t))
+	if len(providers) != 0 {
+		t.Errorf("got %d providers, want 0 (token missing)", len(providers))
+	}
+	if len(warns) != 1 {
+		t.Fatalf("got %d warnings, want 1", len(warns))
+	}
+	if !strings.Contains(warns[0].Error(), "nobody@example.com") {
+		t.Errorf("warning = %v, want it to name the account", warns[0])
+	}
+}
+
+func TestBuildGmailProviders_withToken_buildsProvider(t *testing.T) {
+	paths := gmailTestPaths(t)
+	tok := `{"access_token":"at","refresh_token":"rt","token_type":"Bearer"}`
+	if err := os.WriteFile(paths.TokenFile("me@example.com"), []byte(tok), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	cfg := config.Config{Gmail: []config.GmailAccount{{Account: "me@example.com"}}}
+
+	providers, warns := BuildGmailProviders(context.Background(), cfg, paths)
+	if len(warns) != 0 {
+		t.Fatalf("unexpected warnings: %v", warns)
+	}
+	if len(providers) != 1 {
+		t.Fatalf("got %d providers, want 1", len(providers))
+	}
+	if providers[0].ID() != "gmail:me@example.com" {
+		t.Errorf("provider ID = %q", providers[0].ID())
+	}
+}
+
+func TestBuildGmailProviders_badLookback_returnsWarning(t *testing.T) {
+	cfg := config.Config{
+		Lookback: "not-a-duration",
+		Gmail:    []config.GmailAccount{{Account: "me@example.com"}},
+	}
+	providers, warns := BuildGmailProviders(context.Background(), cfg, gmailTestPaths(t))
+	if len(providers) != 0 || len(warns) != 1 {
+		t.Errorf("bad lookback: providers=%d warns=%d, want 0/1", len(providers), len(warns))
 	}
 }
