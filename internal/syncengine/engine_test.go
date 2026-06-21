@@ -278,6 +278,53 @@ func TestSyncAll_concurrencyBounded(t *testing.T) {
 	}
 }
 
+func TestTrigger_drivesAnExtraSweep(t *testing.T) {
+	ctx := t.Context() // cancelled at test end, stopping Run cleanly
+	st := newTestStore(t)
+	now := time.Now().UTC()
+
+	p := &mockProvider{id: "a", name: "A", items: []model.Item{item("a", "a1", "Alpha", now)}}
+	e := New([]source.Provider{p}, st, time.Hour) // long interval: no automatic tick during the test
+
+	go e.Run(ctx)
+
+	// Drain the immediate first sweep.
+	if got := drain(t, e, 1); got[0].SourceName != "A" {
+		t.Fatalf("first result from %q, want A", got[0].SourceName)
+	}
+
+	// A manual trigger must drive a second sweep without waiting for the ticker.
+	e.Trigger()
+	select {
+	case r := <-e.Events():
+		if r.SourceName != "A" {
+			t.Errorf("triggered result from %q, want A", r.SourceName)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Trigger did not drive an extra sweep")
+	}
+}
+
+func TestTrigger_nonBlockingWhenFull(t *testing.T) {
+	st := newTestStore(t)
+	// Run is never started, so the buffered trigger channel fills after one send and
+	// stays full; subsequent Triggers must coalesce rather than block the caller.
+	e := New([]source.Provider{&mockProvider{id: "a", name: "A"}}, st, time.Hour)
+
+	done := make(chan struct{})
+	go func() {
+		for range 100 {
+			e.Trigger()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Trigger blocked when its buffer was full")
+	}
+}
+
 func TestRun_cancelClosesChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	st := newTestStore(t)

@@ -1,7 +1,7 @@
 // Package keys defines the application key bindings and the help.KeyMap that
 // drives the on-screen help line (DESIGN.md §6.7). Step 04 wired the navigation,
-// open/back, help, and quit keys; step 05 adds search, the quick filters, and the
-// read-state toggles. The sync keys arrive in a later step.
+// open/back, help, and quit keys; step 05 added search, the quick filters, and the
+// read-state toggles; step 08 adds open-in-browser ("o") and force-sync ("R").
 package keys
 
 import "charm.land/bubbles/v2/key"
@@ -35,6 +35,10 @@ type KeyMap struct {
 	FilterAll    key.Binding // "a"  reset every filter
 	ToggleRead   key.Binding // "m"  toggle the selected item's read flag
 	MarkAllRead  key.Binding // "M"  mark every matching item read
+
+	// Actions (step 08).
+	OpenBrowser key.Binding // "o"  open the current item's permalink in the browser
+	ForceSync   key.Binding // "R"  request an immediate sync sweep
 }
 
 // Default returns the standard key bindings: vi-style motion, open/back/help/quit,
@@ -58,6 +62,9 @@ func Default() KeyMap {
 		FilterAll:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
 		ToggleRead:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle read")),
 		MarkAllRead:  key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "mark all read")),
+
+		OpenBrowser: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
+		ForceSync:   key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "sync now")),
 	}
 }
 
@@ -71,9 +78,9 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Top, k.Bottom},
-		{k.Open, k.Back},
+		{k.Open, k.Back, k.OpenBrowser},
 		{k.Search, k.FilterEmail, k.FilterRSS, k.FilterUnread, k.FilterAll},
-		{k.ToggleRead, k.MarkAllRead},
+		{k.ToggleRead, k.MarkAllRead, k.ForceSync},
 		{k.Help, k.Quit},
 	}
 }

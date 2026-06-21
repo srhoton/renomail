@@ -22,3 +22,25 @@ func TestDefaultStyles_unreadDistinctFromRead(t *testing.T) {
 		t.Error("Header.Render returned empty output")
 	}
 }
+
+func TestStylesForBackground_pickHeaderPerBackground(t *testing.T) {
+	light := stylesForBackground(false)
+	dark := stylesForBackground(true)
+
+	// The header accent is chosen per background for contrast, so the two palettes
+	// must not share a foreground; the bold/faint distinctions stay constant.
+	if light.Header.GetForeground() == dark.Header.GetForeground() {
+		t.Error("header foreground is identical for light and dark backgrounds")
+	}
+	for name, s := range map[string]Styles{"light": light, "dark": dark} {
+		if !s.Unread.GetBold() {
+			t.Errorf("%s: Unread is not bold", name)
+		}
+		if !s.Read.GetFaint() {
+			t.Errorf("%s: Read is not faint", name)
+		}
+		if got := s.Header.Render("hi"); got == "" {
+			t.Errorf("%s: Header.Render returned empty output", name)
+		}
+	}
+}

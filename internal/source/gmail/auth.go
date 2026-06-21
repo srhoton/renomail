@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/pkg/browser"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -151,9 +152,9 @@ func waitForCode(ctx context.Context, ln net.Listener, state string) (string, er
 }
 
 // Authorize runs the interactive consent flow for one account and persists the
-// resulting token. It binds an ephemeral loopback listener, prints the consent
-// URL (step 08 will auto-open a browser), waits for the redirect, exchanges the
-// code, and saves the token at 0600. It is only ever invoked by
+// resulting token. It binds an ephemeral loopback listener, prints the consent URL
+// and best-effort opens it in the default browser, waits for the redirect,
+// exchanges the code, and saves the token at 0600. It is only ever invoked by
 // `renomail auth <account>`, never during normal headless startup.
 func Authorize(ctx context.Context, paths config.Paths, account string) error {
 	cfg, err := oauthConfig(paths.Credentials)
@@ -173,6 +174,10 @@ func Authorize(ctx context.Context, paths config.Paths, account string) error {
 	}
 	authURL := cfg.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 	fmt.Printf("Open this URL to authorize %s:\n\n%s\n\n", account, authURL)
+	// Best-effort: open the consent page automatically. The printed URL above is the
+	// fallback for headless/SSH sessions where no browser can be launched, so a
+	// failure here is intentionally ignored.
+	_ = browser.OpenURL(authURL)
 
 	code, err := waitForCode(ctx, ln, state)
 	if err != nil {

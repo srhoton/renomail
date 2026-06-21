@@ -77,15 +77,11 @@ func seedItems() []model.Item {
 // root model ready to drive.
 func newSeededModel(t *testing.T) (Model, *store.Store) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "ui.db"))
-	if err != nil {
-		t.Fatalf("store.Open() error = %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	st := newSeededStore(t)
 	if err := st.UpsertItems(context.Background(), seedItems()); err != nil {
 		t.Fatalf("UpsertItems() error = %v", err)
 	}
-	m, err := New(st, nil, nil, nil)
+	m, err := New(st, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -341,7 +337,7 @@ func TestUpdate_syncBatch_withError_setsStatusAndDoesNotPanic(t *testing.T) {
 func TestUpdate_syncBatch_initialSweepStopsSpinner(t *testing.T) {
 	st := newSeededStore(t)
 	prov := stubProvider{id: "gmail:me", body: "x"}
-	m, err := New(st, make(chan syncengine.Result), []source.Provider{prov}, nil)
+	m, err := New(st, make(chan syncengine.Result), []source.Provider{prov}, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -354,6 +350,145 @@ func TestUpdate_syncBatch_initialSweepStopsSpinner(t *testing.T) {
 
 	if m.syncing || m.inflight != 0 {
 		t.Errorf("after the only provider reported: syncing=%v inflight=%d, want false/0", m.syncing, m.inflight)
+	}
+}
+
+func TestUpdate_openInBrowser_feedAndReader(t *testing.T) {
+	m, _ := newSeededModel(t)
+	var got string
+	m.openURL = func(u string) error { got = u; return nil }
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	items := []model.Item{{
+		ID: "a", Kind: model.KindRSS, SourceName: "Feed A", Title: "One",
+		URL: "https://example.com/a", BodyText: "body",
+	}}
+	m, _ = step(t, m, itemsLoadedMsg{items: items})
+
+	// Feed view: 'o' opens the selected row's URL.
+	_, cmd := step(t, m, tea.KeyPressMsg{Code: 'o', Text: "o"})
+	if cmd == nil {
+		t.Fatal("'o' returned nil cmd in feed view")
+	}
+	if msg := cmd(); msg != nil {
+		t.Errorf("open command produced %#v, want nil on success", msg)
+	}
+	if got != "https://example.com/a" {
+		t.Errorf("opened URL = %q, want the selected item's URL", got)
+	}
+
+	// Reader view: open the item, then 'o' opens the open item's URL.
+	got = ""
+	m, _ = step(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.view != viewReader {
+		t.Fatalf("precondition: view = %d, want viewReader", m.view)
+	}
+	_, cmd = step(t, m, tea.KeyPressMsg{Code: 'o', Text: "o"})
+	if cmd == nil {
+		t.Fatal("'o' returned nil cmd in reader view")
+	}
+	_ = cmd()
+	if got != "https://example.com/a" {
+		t.Errorf("reader 'o' opened %q, want the open item's URL", got)
+	}
+}
+
+func TestUpdate_openInBrowser_noURLIsNoop(t *testing.T) {
+	m, _ := newSeededModel(t)
+	called := false
+	m.openURL = func(string) error { called = true; return nil }
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: seedItems()}) // seed items have no URL
+
+	_, cmd := step(t, m, tea.KeyPressMsg{Code: 'o', Text: "o"})
+	if cmd != nil {
+		t.Error("'o' on a URL-less item returned a command, want nil (no-op)")
+	}
+	if called {
+		t.Error("opener was invoked for a URL-less item")
+	}
+}
+
+func TestUpdate_openInBrowser_errorSurfacesOnStatus(t *testing.T) {
+	m, _ := newSeededModel(t)
+	m.openURL = func(string) error { return errors.New("no browser") }
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: []model.Item{{
+		ID: "a", Kind: model.KindRSS, Title: "One", URL: "https://example.com/a",
+	}}})
+
+	_, cmd := step(t, m, tea.KeyPressMsg{Code: 'o', Text: "o"})
+	msg := cmd()
+	if em, ok := msg.(errMsg); !ok || em.err == nil {
+		t.Fatalf("open failure produced %#v, want an errMsg", msg)
+	}
+}
+
+func TestUpdate_forceSync_triggersAndRelightsSpinner(t *testing.T) {
+	st := newSeededStore(t)
+	prov := stubProvider{id: "gmail:me", body: "x"}
+	calls := 0
+	m, err := New(st, make(chan syncengine.Result), []source.Provider{prov}, func() { calls++ }, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Drive the initial sweep to completion so the model is idle before forcing.
+	m, _ = step(t, m, syncBatchMsg{syncengine.Result{SourceID: "gmail:me", SourceName: "me"}})
+	if m.syncing {
+		t.Fatal("precondition: still syncing after the only provider reported")
+	}
+
+	m, cmd := step(t, m, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if calls != 1 {
+		t.Errorf("triggerSync called %d times, want 1", calls)
+	}
+	if !m.syncing || m.inflight != 1 {
+		t.Errorf("after 'R': syncing=%v inflight=%d, want true/1", m.syncing, m.inflight)
+	}
+	if cmd == nil {
+		t.Error("'R' returned nil cmd, want a spinner tick")
+	}
+
+	// A second 'R' while a sweep is in flight must be a no-op (no double count).
+	_, _ = step(t, m, tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if calls != 1 {
+		t.Errorf("'R' while syncing triggered again (calls=%d), want it to be a no-op", calls)
+	}
+}
+
+func TestUpdate_resizeInReader_reRendersBody(t *testing.T) {
+	m, _ := newSeededModel(t)
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: seedItems()})
+	m, _ = step(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // open "a" → reader
+	if m.view != viewReader || m.openID != "a" {
+		t.Fatalf("precondition: view=%d openID=%q, want reader/a", m.view, m.openID)
+	}
+
+	_, cmd := step(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
+	if cmd == nil {
+		t.Fatal("resize in reader returned nil cmd, want a re-render body load")
+	}
+	bl, ok := cmd().(bodyLoadedMsg)
+	if !ok {
+		t.Fatalf("resize cmd produced %T, want bodyLoadedMsg", cmd())
+	}
+	if bl.err != nil {
+		t.Fatalf("resize re-render err = %v", bl.err)
+	}
+	if bl.id != "a" {
+		t.Errorf("re-rendered id = %q, want the open item a", bl.id)
+	}
+}
+
+func TestUpdate_keyClearsTransientStatus(t *testing.T) {
+	m, _ := newSeededModel(t)
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: seedItems()})
+	m.status = "stale sync error"
+
+	m, _ = step(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"}) // any non-filter key
+	if m.status != "" {
+		t.Errorf("status = %q, want it cleared on the next keypress", m.status)
 	}
 }
 
