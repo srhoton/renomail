@@ -29,7 +29,7 @@ Makefile                 (optional)
 ### Module init & dependencies
 
 ```bash
-go mod init github.com/steverhoton/renomail
+go mod init github.com/srhoton/renomail
 go get github.com/BurntSushi/toml@latest
 ```
 

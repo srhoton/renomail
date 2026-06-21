@@ -41,8 +41,8 @@ the feeds. This document is the blueprint for the first version.
 | Token storage (optional) | `github.com/zalando/go-keyring` | Default is `0600` file; keyring is an opt-in upgrade |
 | Model tests | `github.com/charmbracelet/x/exp/teatest` | Golden-file view tests + `Update()` unit tests |
 
-Go version: latest stable (1.22+). Module path: `github.com/steverhoton/renomail`
-(adjust to the chosen remote). Build system stays plain `go build` / `go test`.
+Go version: latest stable (1.22+). Module path: `github.com/srhoton/renomail`
+(matches the GitHub remote). Build system stays plain `go build` / `go test`.
 
 ---
 
@@ -385,7 +385,7 @@ path = "~/feeds.opml"      # may list several; or use [[feed]] for one-offs
 
 ## Open items to confirm during build (assumptions made)
 
-- Module path `github.com/steverhoton/renomail` (placeholder; adjust to remote).
+- Module path `github.com/srhoton/renomail` (matches the GitHub remote).
 - Default Gmail query `in:inbox newer_than:30d` and 5-minute sync interval.
 - XDG paths (`~/.config/renomail`, `~/.local/share/renomail`).
 - Pure-Go SQLite (`modernc.org/sqlite`) chosen to avoid a cgo toolchain.
