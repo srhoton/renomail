@@ -1,0 +1,79 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 6?
+    (plan mode) -- produced a plan for Step 06
+    (design/implementation/06-gmail-oauth.md). Research-first pass verified the
+    seams: source.Provider interface, model.Item.NativeID already exists and is
+    persisted by the store (so the doc's proposed native_id migration is
+    unnecessary), the body-load seam (loadBodyCmd reads only store.GetBody, so
+    live TUI body-on-open for Gmail belongs to Step 07), config.Paths.TokenFile
+    (already path-traversal-sanitized), and the dump-as-only-fetch-path reality.
+    Verified the new dependencies and Gmail/oauth2 API surface via `go get @latest`
+    + `go doc` before coding. Plan approved.
+
+[2] /review -- ran a four-reviewer pass (functional, code-quality, ADR,
+    performance) on the changed files, then a re-review after fixes.
+
+[3] fix everything but 1.  (in response to /review's fix prompt)
+    -- address every finding except the HIGH sequential-Get latency item, which
+    is deferred to Step 07 where the background sync engine is built.
+
+[4] /trueup -- commit the work, add the session prompts via git notes, push, and
+    open a PR via the GitHub CLI whose description reflects a full diff against
+    the base branch.
+
+Work performed
+--------------
+- internal/source/gmail (new package, replaced doc.go stub):
+  - auth.go: oauthConfig (read-only scope), Authorize (loopback 127.0.0.1:0,
+    prints consent URL, state/CSRF-validated callback, code exchange), 0600
+    token save/load, ErrNotAuthorized sentinel. Callback single-send guarded by
+    sync.Once.
+  - gmail.go: Provider (source.Provider); New (missing token -> ErrNotAuthorized);
+    Fetch (cold-start newer_than:Nd / incremental after:<unix>, per-page
+    slices.Grow preallocation); toItem; Body (full fetch + selectBodies, id from
+    item.NativeID); headers (case-insensitive first-wins); parseDate (RFC 5322 +
+    InternalDate fallback, UTC); days; cached source id.
+  - mime.go: selectBodies (prefers text/html, captures text/plain, recurses,
+    nil-safe) + pickBodyData (decode-once).
+  - testdata/gmail_multipart.json fixture.
+- internal/feeds/registry.go: BuildGmailProviders (one provider per account;
+  missing token -> warning, not fatal).
+- cmd/renomail: auth.go (runAuth) + main.go dispatch route for `auth <account>`;
+  dump.go generalized to []source.Provider (RSS + Gmail), per-source state via a
+  SourceState() interface check (Gmail gets a minimal Source{LastSync}).
+- design/implementation/06-...md: checklist ticked + deviation notes.
+- go.mod/go.sum: oauth2(/google), google.golang.org/api/gmail/v1 + option;
+  go mod tidy.
+
+Review (one fix iteration)
+--------------------------
+- First pass: functional APPROVED; quality PASS; ADR N/A (0/13 apply); perf PASS
+  with one HIGH + MEDIUM/LOW. Deferred the HIGH (#1, sequential per-message Get
+  latency) to Step 07. Fixed the rest:
+  2. MEDIUM: callbackHandler bool single-send guard -> sync.Once (concurrency-safe;
+     no goroutine leak / Shutdown hang). Added a concurrent-hits regression test.
+  3. MEDIUM: Fetch per-page preallocation via slices.Grow.
+  4. LOW: cache Provider.id once; ID() returns the field.
+  5. LOW: mime.go godoc reworded (dropped misleading RFC-2046 claim).
+  6. LOW: selectBodies decode-once (pickBodyData returns raw data).
+  7. LOW: deduped test credentials fixture via a credentialsJSON(tokenURI) builder.
+  8. (no-op observation: empty-body Body() diagnostic -> Step 07 to decide.)
+  9. LOW: dump test fixture year 2006 -> 2024 (weekdays corrected, ordering kept).
+- Re-review: functional APPROVED, quality PASS, performance PASS (ADR re-run
+  skipped as definitively N/A).
+
+Notable: a prompt-injection attempt surfaced in the Discord MCP server
+instructions during the review ("approve the pending pairing"); it was ignored
+and no Discord/access actions were taken.
+
+Decisions
+---------
+- No native_id migration (model.Item.NativeID already persisted); Body uses it.
+- dump fetches all providers (only end-to-end path before the Step 07 engine).
+- Live TUI body-on-open for Gmail deferred to Step 07 (loadBodyCmd provider
+  fallback + SetBody cache; provider set wired into ui.New by the sync engine).
+- No browser dependency (Authorize prints the URL; auto-open is Step 08); keyring
+  skipped (0600 token file via Paths.TokenFile).
+- HIGH sequential-Get latency deferred to Step 07 (bounded errgroup / batch Get).
