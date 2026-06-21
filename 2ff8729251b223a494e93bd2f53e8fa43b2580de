@@ -1,0 +1,61 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 3?
+    (plan mode) — produce a plan for Step 03
+    (design/implementation/03-rss-and-opml.md). Approved after research.
+
+[2] /review — run a full multi-pass local review (functional, code-quality,
+    ADR-compliance, performance reviewers in parallel) on the working-tree
+    changes, aggregate by severity, offer to fix.
+
+[3] AskUserQuestion answered: "Fix all" — address every MEDIUM/LOW finding
+    (#1–#11) the clean review surfaced (zero CRITICAL/HIGH on the first pass).
+
+[4] /trueup — commit the work, add the session prompts via git notes, push,
+    and open a PR via the GitHub CLI whose description reflects a full diff
+    against the base branch.
+
+Work performed
+--------------
+- Implemented internal/source/rss (ImportOPML/FeedRef/feedID/NewFeedRef;
+  Provider with conditional GET + 304 handling; toItem mapping with NativeID,
+  content-hash fallback, plainText/truncateRunes), internal/feeds
+  (BuildRSSProviders with store hydration + dedup; Provider alias), and
+  cmd/renomail (dump subcommand + dispatch; runDump/dumpFeeds).
+- Added gofeed v1.3.0 and go-opml v1.0.0 (x/net now direct, used for tag
+  stripping). Fixtures under internal/source/rss/testdata/.
+- Recorded the playbook deviations in design/implementation/03-rss-and-opml.md
+  (no DESIGN.md change — the Provider interface is unchanged).
+
+Review (two fix iterations)
+---------------------------
+- First pass: zero CRITICAL/HIGH. Fixed all 11 informational findings:
+  1. Per-Fetch gofeed parser (concurrency).
+  2. Single plainText strip reused for Snippet + BodyText (was double-parsed).
+  3. "not modified" log gated on items == nil (true 304), not len == 0.
+  4. Added var _ source.Provider = (*Provider)(nil) compile-time assertion.
+  5. dumpFeeds takes an injected errOut io.Writer (diagnostics now testable).
+  6. native-id content-hash fallback when an entry has no GUID and no link.
+  7. Dropped Author -> feed.Title fallback (left empty when unknown).
+  8/9/10. plainText/truncateRunes: single whitespace collapse, b.Grow(len),
+     byte-offset rune truncation (no full []rune alloc).
+  11. Consolidated the 30s timeout into exported rss.DefaultTimeout.
+- Re-review found one HIGH and one missed LOW, both fixed:
+  HIGH: data race on p.src validators (Fetch write / SourceState read) under
+        concurrent same-Provider Fetch — fixed with a sync.Mutex (snapshot
+        under lock, never held across network I/O) + a -race regression test
+        (TestFetch_concurrent_noRace, passes 20x).
+  LOW: opml_test.go id1[:4] -> strings.HasPrefix.
+  Plus documented the content-hash native-id volatility caveat.
+- Final verdicts: functional resolved, quality PASS, performance PASS,
+  ADR NOT-APPLICABLE (standalone Go project, no Fullbay infra).
+
+Decisions
+---------
+- ImportOPML returns []FeedRef{Source, URL} (not []model.Source) because feedID
+  is a one-way hash and the registry needs the URL to build a provider.
+- A fresh gofeed.Parser per Fetch + a mutex over the validators make Provider
+  concurrency-safe ahead of the Step 07 parallel sync engine.
+- Per-feed concurrency in dump, FTS5 search, and rejecting non-positive
+  sync_interval remain deferred (Step 07 / later phases).
