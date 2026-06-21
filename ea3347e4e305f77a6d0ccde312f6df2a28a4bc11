@@ -1,0 +1,56 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 2?
+    (plan mode) — produce a plan for Step 02
+    (design/implementation/02-model-and-store.md).
+
+[2] AskUserQuestion answered: adopt native_id now (add an items.native_id
+    column + model.Item.NativeID; back-port into DESIGN.md), rather than
+    deferring a v1->v2 migration to Step 06.
+
+[3] (plan approved) — implement Step 02 on a green working tree.
+
+[4] /review — run a full multi-pass local review (functional, code-quality,
+    ADR-compliance, performance reviewers in parallel) on the working-tree
+    changes, aggregate by severity, offer to fix the actionable ones.
+
+[5] Please address 1-7. — fix all seven informational findings the review
+    surfaced (the review found zero CRITICAL/HIGH).
+
+[6] /trueup — commit the work, add the session prompts via git notes, push,
+    and open a PR via the GitHub CLI whose description reflects a full diff
+    against the base branch.
+
+Work performed
+--------------
+- Implemented internal/model (Item incl. NativeID, Source, Filter, Kind,
+  ReadState, StableID), internal/source (Provider interface), and
+  internal/store (modernc.org/sqlite: Open/OpenContext + ctx-aware migrate
+  with schema_version, read-preserving UpsertItems, parameterized Query with
+  shared buildWhere/inClause, SetRead, MarkAllRead, body + source methods,
+  Close).
+- Back-ported native_id into DESIGN.md sections 3/5 and the Step 02 doc.
+- Ran a four-reviewer pass (APPROVED / PASS / PASS / no ADR violations,
+  zero CRITICAL/HIGH) and addressed all seven LOW findings:
+  1. Search escapes LIKE wildcards (%/_/\) with ESCAPE '\'.
+  2. Query selects a body-less listColumns set; bodies load lazily via GetBody.
+  3. Schema version parsed with strconv.Atoi(TrimSpace)/written with strconv.Itoa.
+  4. ORDER BY published DESC, id DESC (deterministic tie-breaker).
+  5. Open delegates to OpenContext(ctx, path); migrate(ctx) uses *Context calls.
+  6. Added tests: SetRead un-read path, ETag/LastModified on source update,
+     multi-value kind IN, search+filter combinations, literal-wildcard search.
+  7. StableID streams parts into the hasher (no concat alloc); Query slice
+     pre-sized to 256.
+- Re-review (functional/quality/performance) returned APPROVED / PASS / PASS;
+  StableID output verified byte-identical to the prior concat form. One
+  follow-on LOW was folded in: removed the now-single-use rowScanner
+  abstraction (scanListItem takes *sql.Rows directly).
+
+Decisions
+---------
+- native_id adopted in Step 02 (schema_version stays 1; no future migration).
+- FTS5 for search and composite indexes for hot filtered views are deliberately
+  deferred to later phases (acceptable at personal-mailbox scale).
+- Rejecting non-positive sync_interval remains deferred to Step 07, where the
+  parsed duration is consumed.
