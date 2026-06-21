@@ -1,0 +1,71 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 5?
+    (plan mode) -- produced a plan for Step 05
+    (design/implementation/05-filtering-and-read-state.md). Verified the store
+    layer (Query/SetRead/MarkAllRead + buildWhere) already honors every
+    model.Filter field, and that bubbles/v2/textinput is available. Plan
+    approved.
+
+[2] please address all 8.  (in response to /review)
+    -- /review ran a four-reviewer pass (functional, code-quality, ADR,
+    performance) on the working tree. Zero critical/high; eight MEDIUM/LOW
+    findings. The user asked to address all eight.
+
+[3] /trueup -- commit the work, add the session prompts via git notes, push, and
+    open a PR via the GitHub CLI whose description reflects a full diff against
+    the base branch.
+
+Work performed
+--------------
+- internal/ui/keys: added Search, FilterEmail/RSS/Unread/All, ToggleRead,
+  MarkAllRead, and a ForceQuit (ctrl+c only) binding; updated Short/Full help.
+- internal/ui/filterbar: new package (replaced the doc.go stub) wrapping
+  bubbles/v2/textinput (Focus/Blur/Focused/SetValue/Value/Update/View). No new
+  module dependency (textinput ships inside the already-direct bubbles/v2).
+- internal/ui/feed: SetReadLocal(id, read) (stale-safe by id); removed
+  MarkSelectedRead; exact b.Grow via separatorBytes.
+- internal/ui/messages: readToggledMsg + reloadMsg; setReadCmd now returns
+  readToggledMsg; markAllReadCmd persists then returns reloadMsg.
+- internal/ui/app: filterbar field; viewFilter routed before the global quit so a
+  literal "q" edits the search term; quick-filter/read keys; applyFilter helper
+  caches the status-bar filter hint off the per-frame path; unread-only re-query
+  on read-toggle.
+- design/implementation/05-...md: checklist ticked + deviation notes.
+
+Notable incident: local main was stale (stuck at the initial commit), so the
+branch was first created without the Step 02-04 files. Reset the branch onto
+origin/main (08ca1a5) and fast-forwarded local main to match.
+
+Review (one fix iteration)
+--------------------------
+- First pass: zero CRITICAL/HIGH; one MEDIUM + seven LOW. Fixed all 8:
+  1. MEDIUM: filterHint ReadReadOnly branch unreachable/untested -> covered by a
+     table-driven TestFilterHint (all enum branches + combinations).
+  2. LOW: filterHint recomputed per frame -> cached in m.hint, refreshed only via
+     applyFilter (every filter-mutation site routes through it).
+  3. LOW: filterbar.Reset() dead export -> removed; test clears via SetValue("").
+  4. LOW: ctrl+c handled via a string literal -> dedicated keys.ForceQuit binding
+     matched with key.Matches.
+  5. LOW: feed b.Grow magic "+6" (actually an over-allocation) -> exact byte
+     count via separatorBytes = 5.
+  6. LOW: SetItems returned cmd untested -> TestModel_setItems_returnsRunnableCmd.
+  7. LOW: Open used selection-addressed MarkSelectedRead -> id-addressed
+     SetReadLocal; MarkSelectedRead removed entirely.
+  8. INFO: SetReadLocal O(n) scan -> confirmed correct (per-keypress, never per
+     frame); left as the deliberate choice.
+- Re-review: functional APPROVED, quality PASS, performance PASS, ADR
+  NOT-APPLICABLE.
+
+Decisions
+---------
+- e/r/u compose onto the current filter; a resets to a zero model.Filter{}.
+- setReadCmd returns readToggledMsg (confirm-by-id); under an unread-only filter
+  the handler re-queries so a now-read item drops out, otherwise confirms in
+  place.
+- markAllReadCmd returns reloadMsg rather than tea.Sequence, guaranteeing the
+  re-query runs after the write.
+- Source scoping (SourceIDs) deferred (store supports it; no key/UI this step).
+- Filter/read wiring only; background sync engine (R force-sync), Gmail provider,
+  and open-in-browser remain deferred (steps 06/07).
