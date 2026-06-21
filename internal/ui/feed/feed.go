@@ -85,8 +85,11 @@ func (d delegate) Render(w io.Writer, m list.Model, index int, li list.Item) {
 	titleCols := max(m.Width()-fixedCols-runewidth.StringWidth(r.age), minTitleCols)
 	title := runewidth.FillRight(truncate(r.item.Title, titleCols), titleCols)
 
+	// Exact final size: every component's byte length plus the 5 separator bytes
+	// written below (three single spaces and one two-space gap).
+	const separatorBytes = 5
 	var b strings.Builder
-	b.Grow(len(cursor) + len(dot) + len(r.kind) + len(r.source) + len(title) + len(r.age) + 6)
+	b.Grow(len(cursor) + len(dot) + len(r.kind) + len(r.source) + len(title) + len(r.age) + separatorBytes)
 	b.WriteString(cursor)
 	b.WriteString(dot)
 	b.WriteByte(' ')
@@ -143,17 +146,21 @@ func (m Model) Selected() (model.Item, bool) {
 	return r.item, true
 }
 
-// MarkSelectedRead flips the highlighted row's read flag in place so the dot and
-// dimming update immediately on return from the reader, without a full re-query.
-// The precomputed columns are unaffected by the read flag, so the row is reused.
-func (m *Model) MarkSelectedRead() {
-	idx := m.list.Index()
-	r, ok := m.list.SelectedItem().(row)
-	if !ok {
+// SetReadLocal flips the read flag of the row with the given id in place, so its
+// dot and dimming update immediately without a full re-query. It addresses the row
+// by id (rather than by selection) so a persisted read confirmation can be
+// reflected even if the selection has since moved. Unknown ids are a no-op. The
+// precomputed columns are unaffected by the read flag, so the row is reused.
+func (m *Model) SetReadLocal(id string, read bool) {
+	for i, li := range m.list.Items() {
+		r, ok := li.(row)
+		if !ok || r.item.ID != id {
+			continue
+		}
+		r.item.Read = read
+		m.list.SetItem(i, r)
 		return
 	}
-	r.item.Read = true
-	m.list.SetItem(idx, r)
 }
 
 // Update forwards messages (motion keys, resize) to the embedded list.

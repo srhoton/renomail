@@ -231,8 +231,12 @@ func TestLoadBodyCmd_missingItem_returnsError(t *testing.T) {
 func TestSetReadCmd_persistsReadFlag(t *testing.T) {
 	_, st := newSeededModel(t)
 
-	if out := setReadCmd(st, "a", true)(); out != nil {
-		t.Errorf("setReadCmd msg = %v, want nil on success", out)
+	msg, ok := setReadCmd(st, "a", true)().(readToggledMsg)
+	if !ok {
+		t.Fatalf("setReadCmd produced %T, want readToggledMsg", setReadCmd(st, "a", true)())
+	}
+	if msg.id != "a" || !msg.read || msg.err != nil {
+		t.Errorf("setReadCmd msg = %+v, want {id:a read:true err:nil}", msg)
 	}
 	items, err := st.Query(context.Background(), model.Filter{})
 	if err != nil {
@@ -250,6 +254,297 @@ func TestStatusBar_withStatus_includesMessage(t *testing.T) {
 	m.status = "status boom"
 	if got := m.statusBar(); !strings.Contains(got, "status boom") {
 		t.Errorf("statusBar() = %q, want it to contain the status message", got)
+	}
+}
+
+// loadedModel returns a seeded, sized model with the feed already populated —
+// the common precondition for the filter and read-state key tests.
+func loadedModel(t *testing.T) (Model, *store.Store) {
+	t.Helper()
+	m, st := newSeededModel(t)
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: seedItems()})
+	return m, st
+}
+
+// keyPress is a small helper for letter/rune key presses.
+func keyPress(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Text: string(r)} }
+
+func TestHandleFeedKey_filterEmail_setsKindAndReQueries(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, cmd := step(t, m, keyPress('e'))
+	if !m.filter.Kinds[model.KindEmail] {
+		t.Error("e did not set filter.Kinds[email]")
+	}
+	if cmd == nil {
+		t.Fatal("e returned nil cmd, want a re-query")
+	}
+	if _, ok := cmd().(itemsLoadedMsg); !ok {
+		t.Error("e re-query did not produce itemsLoadedMsg")
+	}
+}
+
+func TestHandleFeedKey_filterRSS_setsKind(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, cmd := step(t, m, keyPress('r'))
+	if !m.filter.Kinds[model.KindRSS] {
+		t.Error("r did not set filter.Kinds[rss]")
+	}
+	if cmd == nil {
+		t.Error("r returned nil cmd, want a re-query")
+	}
+}
+
+func TestHandleFeedKey_filterUnread_setsReadState(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, cmd := step(t, m, keyPress('u'))
+	if m.filter.Read != model.ReadUnreadOnly {
+		t.Errorf("u set Read = %v, want ReadUnreadOnly", m.filter.Read)
+	}
+	if cmd == nil {
+		t.Error("u returned nil cmd, want a re-query")
+	}
+}
+
+func TestHandleFeedKey_filterAll_resetsFilter(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('r'))    // scope to rss
+	m, _ = step(t, m, keyPress('u'))    // unread only
+	m, cmd := step(t, m, keyPress('a')) // reset
+	if len(m.filter.Kinds) != 0 || m.filter.Read != model.ReadAny || m.filter.Search != "" {
+		t.Errorf("a did not reset the filter: %+v", m.filter)
+	}
+	if cmd == nil {
+		t.Error("a returned nil cmd, want a re-query")
+	}
+}
+
+func TestHandleFeedKey_search_entersFilterViewFocused(t *testing.T) {
+	m, _ := loadedModel(t)
+	m.filter.Search = "preset"
+	m, cmd := step(t, m, keyPress('/'))
+	if m.view != viewFilter {
+		t.Errorf("view = %d after '/', want viewFilter", m.view)
+	}
+	if !m.filterbar.Focused() {
+		t.Error("filter bar not focused after '/'")
+	}
+	if m.filterbar.Value() != "preset" {
+		t.Errorf("filter bar value = %q, want the active term pre-filled", m.filterbar.Value())
+	}
+	if cmd == nil {
+		t.Error("'/' returned nil cmd, want the focus blink command")
+	}
+}
+
+func TestFilterView_typeAndApply_setsSearchAndReQueries(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('/'))
+	for _, r := range "k8s" {
+		m, _ = step(t, m, keyPress(r))
+	}
+	if m.filterbar.Value() != "k8s" {
+		t.Fatalf("filter bar value = %q, want typed term reaching it", m.filterbar.Value())
+	}
+	m, cmd := step(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.view != viewFeed {
+		t.Errorf("view = %d after Enter, want viewFeed", m.view)
+	}
+	if m.filter.Search != "k8s" {
+		t.Errorf("filter.Search = %q after Enter, want %q", m.filter.Search, "k8s")
+	}
+	if cmd == nil || func() bool { _, ok := cmd().(itemsLoadedMsg); return !ok }() {
+		t.Error("Enter did not re-query with itemsLoadedMsg")
+	}
+}
+
+func TestFilterView_escCancels_keepsExistingFilter(t *testing.T) {
+	m, _ := loadedModel(t)
+	m.filter.Search = "keepme"
+	m, _ = step(t, m, keyPress('/'))
+	for _, r := range "junk" {
+		m, _ = step(t, m, keyPress(r))
+	}
+	m, _ = step(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.view != viewFeed {
+		t.Errorf("view = %d after Esc, want viewFeed", m.view)
+	}
+	if m.filter.Search != "keepme" {
+		t.Errorf("filter.Search = %q after Esc, want it unchanged (%q)", m.filter.Search, "keepme")
+	}
+}
+
+func TestFilterView_typingQ_doesNotQuit(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('/'))
+	m, cmd := step(t, m, keyPress('q'))
+	if m.view != viewFilter {
+		t.Errorf("view = %d after typing q in filter, want viewFilter (no quit)", m.view)
+	}
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Error("typing q in the search box quit the app")
+		}
+	}
+	if m.filterbar.Value() != "q" {
+		t.Errorf("filter bar value = %q, want the typed q", m.filterbar.Value())
+	}
+}
+
+func TestFilterView_ctrlC_quits(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('/'))
+	_, cmd := step(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+c in filter returned nil cmd, want quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("ctrl+c in filter did not quit")
+	}
+}
+
+func TestHandleFeedKey_toggleRead_flipsAndPersists(t *testing.T) {
+	m, _ := loadedModel(t) // "a" (unread) is selected
+	m, cmd := step(t, m, keyPress('m'))
+	it, ok := m.feed.Selected()
+	if !ok || !it.Read {
+		t.Fatalf("selected read = %v after m, want optimistic true", it.Read)
+	}
+	if cmd == nil {
+		t.Fatal("m returned nil cmd, want setReadCmd")
+	}
+	msg, ok := cmd().(readToggledMsg)
+	if !ok {
+		t.Fatalf("m cmd produced %T, want readToggledMsg", cmd())
+	}
+	if msg.id != "a" || !msg.read || msg.err != nil {
+		t.Errorf("readToggledMsg = %+v, want {id:a read:true err:nil}", msg)
+	}
+}
+
+func TestUpdate_readToggled_unreadOnly_reQueries(t *testing.T) {
+	m, _ := loadedModel(t)
+	m.filter.Read = model.ReadUnreadOnly
+	_, cmd := step(t, m, readToggledMsg{id: "a", read: true})
+	if cmd == nil {
+		t.Fatal("readToggledMsg under unread-only returned nil cmd, want re-query")
+	}
+	if _, ok := cmd().(itemsLoadedMsg); !ok {
+		t.Error("readToggledMsg under unread-only did not re-query")
+	}
+}
+
+func TestUpdate_readToggled_error_setsStatus(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, readToggledMsg{id: "a", err: errors.New("persist boom")})
+	if !strings.Contains(m.status, "persist boom") {
+		t.Errorf("status = %q, want the persistence error", m.status)
+	}
+}
+
+func TestHandleFeedKey_markAllRead_persistsAndReloads(t *testing.T) {
+	m, st := loadedModel(t)
+	_, cmd := step(t, m, keyPress('M'))
+	if cmd == nil {
+		t.Fatal("M returned nil cmd, want markAllReadCmd")
+	}
+	if _, ok := cmd().(reloadMsg); !ok {
+		t.Fatalf("M cmd produced %T, want reloadMsg", cmd())
+	}
+	// The store write happened when the command ran.
+	items, err := st.Query(context.Background(), model.Filter{})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	for _, it := range items {
+		if !it.Read {
+			t.Errorf("item %s still unread after mark-all-read", it.ID)
+		}
+	}
+}
+
+func TestUpdate_reloadMsg_reQueries(t *testing.T) {
+	m, _ := loadedModel(t)
+	_, cmd := step(t, m, reloadMsg{})
+	if cmd == nil {
+		t.Fatal("reloadMsg returned nil cmd, want a re-query")
+	}
+	if _, ok := cmd().(itemsLoadedMsg); !ok {
+		t.Error("reloadMsg did not re-query with itemsLoadedMsg")
+	}
+}
+
+func TestStatusBar_showsFilterHint(t *testing.T) {
+	m, _ := newSeededModel(t)
+	m.filter = model.Filter{
+		Kinds:  map[model.Kind]bool{model.KindRSS: true},
+		Read:   model.ReadUnreadOnly,
+		Search: "k8s",
+	}
+	m.applyFilter() // refresh the cached hint the status bar reads
+	got := m.statusBar()
+	for _, want := range []string{"Filter:", "rss", "unread", "k8s"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("statusBar() = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+func TestFilterHint(t *testing.T) {
+	tests := []struct {
+		name   string
+		filter model.Filter
+		want   string
+	}{
+		{"zero", model.Filter{}, ""},
+		{"email", model.Filter{Kinds: map[model.Kind]bool{model.KindEmail: true}}, "email"},
+		{"rss", model.Filter{Kinds: map[model.Kind]bool{model.KindRSS: true}}, "rss"},
+		{"both kinds", model.Filter{Kinds: map[model.Kind]bool{model.KindEmail: true, model.KindRSS: true}}, "email · rss"},
+		{"unread", model.Filter{Read: model.ReadUnreadOnly}, "unread"},
+		{"read", model.Filter{Read: model.ReadReadOnly}, "read"},
+		{"search", model.Filter{Search: "k8s"}, `"k8s"`},
+		{"combined", model.Filter{Kinds: map[model.Kind]bool{model.KindRSS: true}, Read: model.ReadReadOnly, Search: "go"}, `rss · read · "go"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := filterHint(tt.filter); got != tt.want {
+				t.Errorf("filterHint(%+v) = %q, want %q", tt.filter, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestView_filterView_showsBar(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('/'))
+	for _, r := range "abc" {
+		m, _ = step(t, m, keyPress(r))
+	}
+	if v := m.View(); !strings.Contains(v.Content, "abc") {
+		t.Errorf("filter view missing the typed term:\n%s", v.Content)
+	}
+}
+
+func TestReadState_survivesReupsert(t *testing.T) {
+	m, st := loadedModel(t)
+	// Mark everything read via the UI, which persists through markAllReadCmd.
+	_, cmd := step(t, m, keyPress('M'))
+	if _, ok := cmd().(reloadMsg); !ok {
+		t.Fatal("M did not persist (no reloadMsg)")
+	}
+	// A subsequent re-sync (UpsertItems with the original unread flags) must not
+	// clobber the local read state — the step-02 guard, re-asserted at the UI level.
+	if err := st.UpsertItems(context.Background(), seedItems()); err != nil {
+		t.Fatalf("UpsertItems() error = %v", err)
+	}
+	items, err := st.Query(context.Background(), model.Filter{})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	for _, it := range items {
+		if !it.Read {
+			t.Errorf("item %s reverted to unread after re-upsert", it.ID)
+		}
 	}
 }
 

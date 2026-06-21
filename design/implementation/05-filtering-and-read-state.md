@@ -178,8 +178,29 @@ Show the active filter compactly in the status bar, e.g.
 
 ## Done checklist
 
-- [ ] `/` search + `e`/`r`/`u`/`a` quick filters drive a single re-query path.
-- [ ] `m`/`M` update and persist read state; styling reflects it immediately.
-- [ ] Read state survives restart and re-sync.
-- [ ] Status bar shows the active filter.
-- [ ] `Update()` + persistence tests pass; `gofmt`/`vet`/`test` green.
+- [x] `/` search + `e`/`r`/`u`/`a` quick filters drive a single re-query path.
+- [x] `m`/`M` update and persist read state; styling reflects it immediately.
+- [x] Read state survives restart and re-sync.
+- [x] Status bar shows the active filter.
+- [x] `Update()` + persistence tests pass; `gofmt`/`vet`/`test` green.
+
+## Implementation notes (deviations)
+
+- **Filter-bar keys are dispatched before the global quit binding.** `handleKey`
+  routes `viewFilter` to `handleFilterKey` first, so a literal `q` typed into the
+  search box edits the term instead of quitting; only `ctrl+c` quits while
+  editing. (The doc's snippet handled `viewFilter` inside the same switch as the
+  `q` quit, which would have quit on every `q` keystroke.)
+- **`e`/`r`/`u` compose onto the current filter; `a` is the full reset.** Setting
+  a kind or unread scope leaves the search term intact, so `/term` then `u` shows
+  unread matches. `a` resets `m.filter` to its zero value (clears everything).
+- **`setReadCmd` returns `readToggledMsg`** (not `nil`), so the optimistic
+  in-memory flip is confirmed by id. Under an unread-only filter the
+  `readToggledMsg` handler re-queries so the now-read item drops out; otherwise it
+  confirms the row in place via `feed.SetReadLocal`.
+- **`markAllReadCmd` returns `reloadMsg`** rather than chaining a re-query with
+  `tea.Sequence`, so the re-query is guaranteed to run after the write.
+- **No new module dependency:** `bubbles/v2/textinput` ships inside the already
+  direct `bubbles/v2` module, so `go.mod` is unchanged.
+- **Source scoping (`SourceIDs`) deferred:** the store supports it, but no key
+  binding/UI is assigned in this step.

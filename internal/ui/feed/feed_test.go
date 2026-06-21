@@ -45,17 +45,53 @@ func TestModel_selectedEmpty(t *testing.T) {
 	}
 }
 
-func TestModel_markSelectedRead(t *testing.T) {
+func TestModel_setItems_returnsRunnableCmd(t *testing.T) {
+	m := newSized()
+	// The returned command is propagated to the Bubble Tea runtime by the caller
+	// (app.go returns it from the itemsLoadedMsg case); exercise it here so the
+	// contract is asserted rather than silently discarded.
+	if cmd := m.SetItems(testItems()); cmd != nil {
+		if msg := cmd(); msg == nil {
+			t.Error("SetItems cmd produced a nil message")
+		}
+	}
+	if _, ok := m.Selected(); !ok {
+		t.Error("Selected() ok = false after SetItems")
+	}
+}
+
+func TestModel_setReadLocal_flipsAddressedRow(t *testing.T) {
 	m := newSized()
 	m.SetItems(testItems())
 
-	m.MarkSelectedRead()
-	it, ok := m.Selected()
-	if !ok {
-		t.Fatal("Selected() ok = false")
+	// "b" is the read item; mark it unread by id while "a" stays selected.
+	m.SetReadLocal("b", false)
+
+	for _, li := range m.list.Items() {
+		r := li.(row)
+		if r.item.ID == "b" && r.item.Read {
+			t.Error("item b still read after SetReadLocal(b,false)")
+		}
+		if r.item.ID == "a" && r.item.Read {
+			t.Error("item a wrongly changed by SetReadLocal(b,...)")
+		}
 	}
-	if !it.Read {
-		t.Error("selected item not marked read after MarkSelectedRead")
+}
+
+func TestModel_setReadLocal_unknownIDIsNoOp(t *testing.T) {
+	m := newSized()
+	m.SetItems(testItems())
+
+	m.SetReadLocal("does-not-exist", true) // must not panic or alter rows
+
+	for _, li := range m.list.Items() {
+		r := li.(row)
+		if r.item.ID == "a" && r.item.Read {
+			t.Error("item a changed by SetReadLocal on unknown id")
+		}
+		if r.item.ID == "b" && !r.item.Read {
+			t.Error("item b changed by SetReadLocal on unknown id")
+		}
 	}
 }
 
