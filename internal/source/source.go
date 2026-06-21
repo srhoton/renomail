@@ -27,3 +27,24 @@ type Provider interface {
 	// Called when the reader opens an item whose body is not yet cached.
 	Body(ctx context.Context, item *model.Item) error
 }
+
+// Stateful is implemented by providers that carry refreshed sync bookkeeping the
+// caller should persist after a fetch (RSS exposes its updated ETag/Last-Modified
+// via SourceState). Providers without it — Gmail — get a minimal Source recorded
+// with just the current LastSync.
+type Stateful interface {
+	SourceState() model.Source
+}
+
+// StateOf returns the model.Source to persist for p after a sweep at now: the
+// provider's own refreshed state when it implements Stateful (RSS), otherwise a
+// minimal record carrying id, name, kind, and LastSync (Gmail). Shared by the
+// dump command and the sync engine so per-source persistence stays uniform.
+func StateOf(p Provider, now time.Time) model.Source {
+	if ss, ok := p.(Stateful); ok {
+		src := ss.SourceState()
+		src.LastSync = now
+		return src
+	}
+	return model.Source{ID: p.ID(), Name: p.Name(), Kind: p.Kind(), LastSync: now}
+}

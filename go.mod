@@ -20,6 +20,7 @@ require (
 	github.com/mmcdole/gofeed v1.3.0
 	golang.org/x/net v0.56.0
 	golang.org/x/oauth2 v0.36.0
+	golang.org/x/sync v0.21.0
 	google.golang.org/api v0.285.0
 	modernc.org/sqlite v1.53.0
 )
@@ -76,7 +77,6 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260610212136-7ab31c22f7ad // indirect

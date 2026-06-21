@@ -125,13 +125,16 @@ func TestBuildTUI_success(t *testing.T) {
 		DataDir: filepath.Join(dir, "data"),
 		DBFile:  filepath.Join(dir, "data", "renomail.db"),
 	}
-	_, st, err := buildTUI(paths)
+	_, st, eng, err := buildTUI(context.Background(), config.Config{}, paths)
 	if err != nil {
 		t.Fatalf("buildTUI() error = %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	if st == nil {
 		t.Fatal("buildTUI() store = nil, want open store")
+	}
+	if eng == nil {
+		t.Fatal("buildTUI() engine = nil, want a constructed sync engine")
 	}
 }
 

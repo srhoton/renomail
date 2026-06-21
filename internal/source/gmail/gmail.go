@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 
@@ -81,39 +82,87 @@ func (p *Provider) Name() string { return p.account }
 // Kind reports that this provider yields email items.
 func (p *Provider) Kind() model.Kind { return model.KindEmail }
 
+// fetchConcurrency bounds the per-message metadata Get calls issued within one
+// Fetch. A cold start over a large inbox is dominated by these round-trips, so
+// fetching them concurrently (rather than serially) is the difference between a
+// snappy first sweep and a multi-second stall. Note this bounds one account's
+// Gets; the sync engine fetches several providers concurrently too, so the
+// process-wide ceiling of in-flight Gmail Gets is (engine fan-out) ×
+// fetchConcurrency. With the handful of accounts a personal reader configures this
+// stays comfortably within Gmail's per-user limits; it is the knob to lower if a
+// large account count ever pressures the shared project quota.
+const fetchConcurrency = 8
+
 // Fetch lists inbox messages and returns one body-less model.Item per message
 // (headers + snippet only). On a cold start (zero since) it scans the configured
 // lookback window; once a LastSync is known it asks only for messages after it.
-// Bodies are loaded lazily by Body.
+// Listing collects the message ids first, then the per-message metadata is fetched
+// concurrently (bounded) into a position-indexed slice, so the result preserves the
+// list order while cold-start latency stays low.
+//
+// Per-message Gets are resilient: a single failed Get does not abort the others or
+// discard the messages already fetched. Fetch returns the items it successfully
+// retrieved (compacted, still in list order) together with the first error, so the
+// caller can persist the partial result and retry the rest on the next sweep rather
+// than re-fetching the whole window. Bodies are loaded lazily by Body.
 func (p *Provider) Fetch(ctx context.Context, since time.Time) ([]model.Item, error) {
 	now := time.Now()
-	var items []model.Item
+	var ids []string
 	call := p.svc.Users.Messages.List("me").Q(p.query(since))
 	err := call.Pages(ctx, func(page *gmail.ListMessagesResponse) error {
 		// Grow once per page (the page size is known) so the per-message appends
-		// below do not trigger repeated reallocations across a large inbox.
-		items = slices.Grow(items, len(page.Messages))
+		// do not trigger repeated reallocations across a large inbox.
+		ids = slices.Grow(ids, len(page.Messages))
 		for _, ref := range page.Messages {
-			msg, err := p.svc.Users.Messages.Get("me", ref.Id).
-				Format("metadata").MetadataHeaders(metadataHeaders...).
-				Context(ctx).Do()
-			if err != nil {
-				return fmt.Errorf("get message %s: %w", ref.Id, err)
-			}
-			items = append(items, p.toItem(msg, now))
+			ids = append(ids, ref.Id)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list messages for %s: %w", p.account, err)
 	}
-	return items, nil
+
+	// Fan the metadata Gets out with a bounded worker pool, writing each result to
+	// its list position so distinct indices never race and order is preserved. A
+	// plain errgroup (no derived context) is used deliberately so one Get's failure
+	// does not cancel the in-flight others — every id is attempted, and Wait reports
+	// the first error while the successes remain in the slice.
+	items := make([]model.Item, len(ids))
+	var g errgroup.Group
+	g.SetLimit(fetchConcurrency)
+	for i, id := range ids {
+		g.Go(func() error {
+			msg, err := p.svc.Users.Messages.Get("me", id).
+				Format("metadata").MetadataHeaders(metadataHeaders...).
+				Context(ctx).Do()
+			if err != nil {
+				return fmt.Errorf("get message %s: %w", id, err)
+			}
+			items[i] = p.toItem(msg, now)
+			return nil
+		})
+	}
+	waitErr := g.Wait()
+
+	// Compact out the gaps left by any failed Gets, preserving list order.
+	fetched := items[:0]
+	for _, it := range items {
+		if it.NativeID != "" {
+			fetched = append(fetched, it)
+		}
+	}
+	if waitErr != nil {
+		return fetched, fmt.Errorf("fetch messages for %s: %w", p.account, waitErr)
+	}
+	return fetched, nil
 }
 
 // query builds the Gmail search expression for a fetch. With no prior sync it
 // bounds the scan to the lookback window (newer_than:Nd); afterwards it requests
-// only messages received after the last sync (after:<unix>), so steady-state
-// syncs stay cheap.
+// only messages received after the last sync (after:<unix>), so steady-state syncs
+// stay cheap. Gmail's after: is inclusive at second granularity, so the message(s)
+// at exactly the previous LastSync are re-listed each sweep; this is harmless
+// because the store upsert is idempotent and preserves local read state.
 func (p *Provider) query(since time.Time) string {
 	if since.IsZero() {
 		return fmt.Sprintf("in:inbox newer_than:%dd", days(p.lookback))

@@ -271,7 +271,18 @@ func (s *Store) GetSource(ctx context.Context, id string) (model.Source, bool, e
 
 // UpsertSource inserts or replaces a source's metadata and sync bookkeeping.
 func (s *Store) UpsertSource(ctx context.Context, src model.Source) error {
-	const q = `
+	if _, err := s.db.ExecContext(ctx, upsertSourceSQL,
+		src.ID, string(src.Kind), src.Name, src.LastSync.Unix(),
+		src.ETag, src.LastModified); err != nil {
+		return fmt.Errorf("upsert source %s: %w", src.ID, err)
+	}
+	return nil
+}
+
+// upsertSourceSQL is the shared INSERT…ON CONFLICT statement for persisting a
+// source's metadata and sync bookkeeping, used by both UpsertSource and the
+// batched UpsertSources.
+const upsertSourceSQL = `
 INSERT INTO sources (id, kind, name, last_sync, etag, last_modified)
 VALUES (?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
@@ -280,10 +291,35 @@ ON CONFLICT(id) DO UPDATE SET
   last_sync     = excluded.last_sync,
   etag          = excluded.etag,
   last_modified = excluded.last_modified`
-	if _, err := s.db.ExecContext(ctx, q,
-		src.ID, string(src.Kind), src.Name, src.LastSync.Unix(),
-		src.ETag, src.LastModified); err != nil {
-		return fmt.Errorf("upsert source %s: %w", src.ID, err)
+
+// UpsertSources persists many sources in a single transaction, so a sync sweep
+// commits all its per-source state once rather than contending on SQLite's single
+// writer with one transaction per source. An empty slice is a no-op.
+func (s *Store) UpsertSources(ctx context.Context, srcs []model.Source) error {
+	if len(srcs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, upsertSourceSQL)
+	if err != nil {
+		return fmt.Errorf("prepare upsert sources: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, src := range srcs {
+		if _, err := stmt.ExecContext(ctx,
+			src.ID, string(src.Kind), src.Name, src.LastSync.Unix(),
+			src.ETag, src.LastModified); err != nil {
+			return fmt.Errorf("upsert source %s: %w", src.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit upsert sources: %w", err)
 	}
 	return nil
 }

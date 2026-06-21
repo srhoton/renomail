@@ -10,26 +10,16 @@ import (
 	"time"
 
 	"github.com/srhoton/renomail/internal/config"
-	"github.com/srhoton/renomail/internal/feeds"
 	"github.com/srhoton/renomail/internal/model"
 	"github.com/srhoton/renomail/internal/source"
 	"github.com/srhoton/renomail/internal/source/rss"
 	"github.com/srhoton/renomail/internal/store"
 )
 
-// sourceStateful is implemented by providers that carry refreshed sync
-// bookkeeping for the caller to persist (RSS exposes ETag/Last-Modified via
-// SourceState). Providers without it — Gmail — get a minimal Source recorded with
-// just LastSync. This mirrors the per-source state handling the sync engine
-// (step 07) will formalize.
-type sourceStateful interface {
-	SourceState() model.Source
-}
-
 // runDump executes the full pipeline once — build every provider (RSS + Gmail),
 // fetch each, upsert to the store, then print the merged feed — to prove the data
-// path end to end before the sync engine exists. It opens the store and builds the
-// providers, delegating the loop to dumpFeeds so the core is unit-testable.
+// path end to end. It opens the store and builds the providers, delegating the
+// loop to dumpFeeds so the core is unit-testable.
 func runDump(ctx context.Context, cfg config.Config, paths config.Paths, w io.Writer) error {
 	// The data directory may not exist on a first run; the SQLite driver will
 	// not create it, so ensure it is present before opening the database.
@@ -43,21 +33,12 @@ func runDump(ctx context.Context, cfg config.Config, paths config.Paths, w io.Wr
 	defer func() { _ = st.Close() }()
 
 	client := &http.Client{Timeout: rss.DefaultTimeout}
-	rssProviders, err := feeds.BuildRSSProviders(ctx, cfg, st, client)
+	providers, warns, err := buildProviders(ctx, cfg, paths, st, client)
 	if err != nil {
 		return err
 	}
-	gmailProviders, warns := feeds.BuildGmailProviders(ctx, cfg, paths)
 	for _, warn := range warns {
 		fmt.Fprintf(os.Stderr, "warn: %v\n", warn)
-	}
-
-	providers := make([]source.Provider, 0, len(rssProviders)+len(gmailProviders))
-	for _, p := range rssProviders {
-		providers = append(providers, p)
-	}
-	for _, p := range gmailProviders {
-		providers = append(providers, p)
 	}
 	return dumpFeeds(ctx, w, os.Stderr, st, providers)
 }
@@ -82,7 +63,7 @@ func dumpFeeds(ctx context.Context, out, errOut io.Writer, st *store.Store, prov
 		if err := st.UpsertItems(ctx, items); err != nil {
 			return fmt.Errorf("upsert %s: %w", p.Name(), err)
 		}
-		if err := st.UpsertSource(ctx, sourceStateOf(p, now)); err != nil {
+		if err := st.UpsertSource(ctx, source.StateOf(p, now)); err != nil {
 			return fmt.Errorf("save source %s: %w", p.Name(), err)
 		}
 	}
@@ -99,16 +80,4 @@ func dumpFeeds(ctx context.Context, out, errOut io.Writer, st *store.Store, prov
 			it.Published.Format("01-02 15:04"), it.Kind, it.SourceName, it.Title)
 	}
 	return bw.Flush()
-}
-
-// sourceStateOf returns the Source to persist for p after a fetch: the
-// provider's own refreshed state when it exposes one (RSS), otherwise a minimal
-// record carrying id, name, kind, and the current LastSync (Gmail).
-func sourceStateOf(p source.Provider, now time.Time) model.Source {
-	if ss, ok := p.(sourceStateful); ok {
-		src := ss.SourceState()
-		src.LastSync = now
-		return src
-	}
-	return model.Source{ID: p.ID(), Name: p.Name(), Kind: p.Kind(), LastSync: now}
 }
