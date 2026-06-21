@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/srhoton/renomail/internal/config"
+	"github.com/srhoton/renomail/internal/source/gmail"
 	"github.com/srhoton/renomail/internal/source/rss"
 	"github.com/srhoton/renomail/internal/store"
 )
@@ -47,6 +48,32 @@ func BuildRSSProviders(ctx context.Context, cfg config.Config, st *store.Store, 
 		providers = append(providers, rss.New(src, ref.URL, hc))
 	}
 	return providers, nil
+}
+
+// BuildGmailProviders constructs one Gmail provider per configured account. An
+// account whose OAuth token is missing (gmail.ErrNotAuthorized) is skipped with a
+// descriptive error appended to the second return value rather than failing the
+// whole run, so one un-authorized account never blocks the others. The returned
+// errors are advisory warnings; the provider slice holds only usable accounts.
+func BuildGmailProviders(ctx context.Context, cfg config.Config, paths config.Paths) ([]*gmail.Provider, []error) {
+	lookback, err := cfg.LookbackDuration()
+	if err != nil {
+		return nil, []error{fmt.Errorf("gmail lookback: %w", err)}
+	}
+
+	var (
+		providers []*gmail.Provider
+		warnings  []error
+	)
+	for _, acct := range cfg.Gmail {
+		p, err := gmail.New(ctx, paths, acct.Account, lookback)
+		if err != nil {
+			warnings = append(warnings, fmt.Errorf("gmail %s: %w", acct.Account, err))
+			continue
+		}
+		providers = append(providers, p)
+	}
+	return providers, warnings
 }
 
 // collectRefs gathers feed references from every OPML file and one-off feed in

@@ -235,8 +235,29 @@ func runAuth(ctx context.Context, paths config.Paths, account string) error {
 
 ## Done checklist
 
-- [ ] OAuth loopback flow + `0600` token persistence; refresh works headlessly.
-- [ ] `renomail auth <account>` runs consent once per account.
-- [ ] `Fetch` lists inbox (metadata rows); `Body` lazily loads + MIME-decodes.
-- [ ] Multi-account; missing token degrades to a warning.
-- [ ] MIME/unit tests pass; live manual run verified; `gofmt`/`vet`/`test` green.
+- [x] OAuth loopback flow + `0600` token persistence; refresh works headlessly.
+- [x] `renomail auth <account>` runs consent once per account.
+- [x] `Fetch` lists inbox (metadata rows); `Body` lazily loads + MIME-decodes.
+- [x] Multi-account; missing token degrades to a warning.
+- [x] MIME/unit tests pass; `gofmt`/`vet`/`test` green (gmail 92.1%). Live manual
+      run is a human step pending real Google credentials.
+
+## Implementation notes (deviations)
+
+- **No `native_id` migration.** `model.Item.NativeID` already exists and the store
+  already persists/queries it, so `Body` recovers the Gmail message id directly
+  from `item.NativeID` — no schema change, no DESIGN.md §5 note.
+- **`dump` fetches all providers (RSS + Gmail).** `dumpFeeds` was generalized from
+  `[]*feeds.Provider` to `[]source.Provider`; per-source state persistence moved
+  behind a `SourceState()` interface check (RSS exposes it; Gmail records a minimal
+  `Source{LastSync}`). This is the only end-to-end fetch path before the Step 07
+  engine, so it is how Gmail is demonstrated this step.
+- **Live TUI body-on-open for Gmail is Step 07.** `loadBodyCmd` reads only
+  `store.GetBody` today; Step 07 wires the provider set into the UI and adds a
+  `provider.Body()` fallback (+ `SetBody` cache). `Body` itself is fully tested
+  here against an httptest Gmail endpoint.
+- **No browser dependency.** `Authorize` prints the consent URL (auto-open is
+  Step 08). Keyring storage skipped — tokens are `0600` files via
+  `Paths.TokenFile`.
+- **`scope`** is `gmail.GmailReadonlyScope` (`gmailapi` import alias used to avoid
+  shadowing the package name with the `Provider` field).
