@@ -1,0 +1,42 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 1?
+
+[2] /review — run a full multi-pass local review (functional, code-quality,
+ADR-compliance, performance reviewers in parallel) on the working-tree changes,
+aggregate findings by severity, and offer to fix the actionable ones.
+
+[3] (follow-up to the review) please address all 6. — fix every finding the
+review surfaced, including the informational ones.
+
+[4] /trueup — commit the work, add the session prompts to the commit via git
+notes, push, and create a PR via the GitHub CLI whose description accurately
+reflects a full diff against the base branch.
+
+Work performed
+--------------
+- Planned Step 01 (design/implementation/01-scaffold-and-tooling.md) in plan
+  mode; plan approved.
+- Implemented the Go module, internal/ package layout (doc.go stubs),
+  internal/config (TOML load/save, XDG paths, day-suffix duration helper),
+  the cmd/renomail stub, Makefile, and .editorconfig.
+- Ran a four-reviewer pass; addressed all six findings:
+  1. TokenFile sanitizes the account (no ConfigDir escape).
+  2. go.mod split into `go 1.26` + `toolchain go1.26.4`.
+  3. Extracted testable run(io.Writer) error from main; added main_test.go.
+  4. Switched Config comparisons to go-cmp.
+  5. parseDuration supports fractional days.
+  6. Load validates durations at load time (fail-fast) + accessor doc notes.
+- Re-reviewed: APPROVED / PASS / PASS, no new actionable findings.
+- Fixed the module-path drift steverhoton -> srhoton in the design docs.
+
+Decisions
+---------
+- Module path github.com/srhoton/renomail (matches the real GitHub remote;
+  the playbook's steverhoton was a placeholder, now corrected in the docs).
+- doc.go package stubs so `go build ./...` is green from step 01 while the
+  tree matches DESIGN.md §2.
+- One open item deferred to Step 07: reject non-positive sync intervals when
+  the sync engine consumes the parsed duration (parseDuration mirrors stdlib
+  and accepts negatives today).
