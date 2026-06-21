@@ -1,0 +1,40 @@
+Session prompts that produced this commit
+==========================================
+
+[1] Ok, I want to think through a new Go based app that we will build in this
+repo. For this first session, we're not coding anything. What we want as a work
+product is a detailed design document that we can use as a blueprint for building
+the app. The app will be:
+- A combination of an RSS reader and an email client.
+- The entire app will be built in Go, and will run as a TUI.
+- TUI inspired by charmbracelet and the Bubble Tea framework, but not beholden
+  to it; deviate where needed.
+The idea: a TUI with a continuous feed of content (RSS items + emails) the user
+can interact with — filter by criteria (only emails, only RSS, by source), mark
+items read/unread, open items to view full content. Support multiple Gmail
+accounts and RSS feeds via OPML files, but not a full client — just pull content
+and display it. Marking read/unread can be local-only (color change), no syncing
+state back to Gmail/RSS for v1. Produce a detailed design document outlining
+architecture, main components, data models, and user interactions.
+
+[2] Ok. Can you write the design document to a 'design' directory in this repo?
+
+[3] Take the design just written and think through the implementation steps.
+Output is twofold: (a) a step-by-step design document containing an overview, and
+(b) for each step, a document describing the step in detail, including code
+samples, validation criteria, and implementation flow. All docs written in the
+design directory.
+
+[4] /trueup — commit the work, add prompts in this session to the commit via git
+notes, push, and create a PR via the GitHub CLI. Ensure the PR README accurately
+describes the changes from a full diff against the base branch.
+
+Decisions confirmed via clarifying questions
+--------------------------------------------
+- Email access: Gmail API + OAuth2 (read-only scope), per-account browser flow.
+- Persistence: SQLite caching both items and read/unread state.
+- Layout: full-screen unified list -> drill into a full-screen reader.
+- Rendering: rich HTML -> markdown -> Glamour.
+- Doc granularity: one doc per build phase (8 step docs + 1 overview).
+- Code depth: representative skeletons (not full paste-ready files).
+- Location: design/implementation/ (DESIGN.md at design/ top level).
