@@ -69,7 +69,7 @@ func buildTUI(ctx context.Context, cfg config.Config, paths config.Paths) (ui.Mo
 	}
 
 	eng := syncengine.New(providers, st, interval)
-	m, err := ui.New(st, eng.Events(), providers, warns)
+	m, err := ui.New(st, eng.Events(), providers, eng.Trigger, warns)
 	if err != nil {
 		_ = st.Close()
 		return ui.Model{}, nil, nil, err

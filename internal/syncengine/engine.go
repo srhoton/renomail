@@ -41,11 +41,13 @@ type Engine struct {
 	interval  time.Duration
 	maxConc   int
 	out       chan Result
+	trigger   chan struct{}
 }
 
 // New builds an Engine over the provider set, store, and re-sync interval. The
 // events channel is buffered to the provider count so a full sweep can complete
-// without blocking on a slow consumer.
+// without blocking on a slow consumer. The trigger channel is buffered to one so
+// a manual refresh (Trigger) coalesces rather than blocking the caller.
 func New(providers []source.Provider, st *store.Store, interval time.Duration) *Engine {
 	buf := max(len(providers), 1)
 	return &Engine{
@@ -54,6 +56,17 @@ func New(providers []source.Provider, st *store.Store, interval time.Duration) *
 		interval:  interval,
 		maxConc:   defaultMaxConc,
 		out:       make(chan Result, buf),
+		trigger:   make(chan struct{}, 1),
+	}
+}
+
+// Trigger requests an out-of-band sweep (the UI's force-sync key) without waiting
+// for the next tick. It never blocks: if a sweep is already queued the request is
+// coalesced into the pending one, so rapid presses cannot pile up.
+func (e *Engine) Trigger() {
+	select {
+	case e.trigger <- struct{}{}:
+	default:
 	}
 }
 
@@ -61,8 +74,9 @@ func New(providers []source.Provider, st *store.Store, interval time.Duration) *
 // returns (on context cancellation), so a ranging consumer terminates cleanly.
 func (e *Engine) Events() <-chan Result { return e.out }
 
-// Run performs an immediate first sweep, then re-syncs on the interval until the
-// context is cancelled, at which point it closes the events channel and returns.
+// Run performs an immediate first sweep, then re-syncs on the interval — or
+// whenever Trigger requests an out-of-band sweep — until the context is cancelled,
+// at which point it closes the events channel and returns.
 func (e *Engine) Run(ctx context.Context) {
 	e.syncAll(ctx)
 	t := time.NewTicker(e.interval)
@@ -73,6 +87,8 @@ func (e *Engine) Run(ctx context.Context) {
 			close(e.out)
 			return
 		case <-t.C:
+			e.syncAll(ctx)
+		case <-e.trigger:
 			e.syncAll(ctx)
 		}
 	}

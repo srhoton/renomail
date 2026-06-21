@@ -14,6 +14,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"github.com/pkg/browser"
 
 	"github.com/srhoton/renomail/internal/model"
 	"github.com/srhoton/renomail/internal/render"
@@ -55,11 +56,16 @@ type Model struct {
 	keys      keys.KeyMap
 	help      help.Model
 	theme     styles.Styles
-	openID    string // id of the item currently open in the reader (stale-load guard)
+	openID    string     // id of the item currently open in the reader (stale-load guard)
+	openItem  model.Item // the item currently open in the reader (for resize re-render / open-in-browser)
 	status    string
 	hint      string // cached status-bar filter description; refreshed only on filter change
 	helpView  string // cached help line; refreshed only on resize / help toggle
 	w, h      int
+
+	// actions (step 08)
+	openURL     func(string) error // opens an item's permalink; injectable for tests (default browser.OpenURL)
+	triggerSync func()             // requests an out-of-band engine sweep; nil ⇒ no-op
 
 	// background sync
 	events    <-chan syncengine.Result   // engine results, drained by waitForActivity
@@ -85,6 +91,7 @@ func New(
 	st *store.Store,
 	events <-chan syncengine.Result,
 	providers []source.Provider,
+	triggerSync func(),
 	warns []error,
 ) (Model, error) {
 	r, err := render.New(defaultWidth)
@@ -99,22 +106,24 @@ func New(
 	}
 
 	m := Model{
-		view:      viewFeed,
-		feed:      feed.New(theme),
-		reader:    reader.New(theme),
-		filterbar: filterbar.New(),
-		filter:    model.Filter{},
-		store:     st,
-		renderer:  r,
-		keys:      keys.Default(),
-		help:      help.New(),
-		theme:     theme,
-		status:    warnStatus(warns),
-		events:    events,
-		providers: byID,
-		hydrated:  make(map[string]bool),
-		spinner:   spinner.New(),
-		sources:   len(providers),
+		view:        viewFeed,
+		feed:        feed.New(theme),
+		reader:      reader.New(theme),
+		filterbar:   filterbar.New(),
+		filter:      model.Filter{},
+		store:       st,
+		renderer:    r,
+		keys:        keys.Default(),
+		help:        help.New(),
+		theme:       theme,
+		status:      warnStatus(warns),
+		events:      events,
+		providers:   byID,
+		hydrated:    make(map[string]bool),
+		spinner:     spinner.New(),
+		sources:     len(providers),
+		openURL:     browser.OpenURL,
+		triggerSync: triggerSync,
 		// The engine runs an immediate first sweep emitting one result per
 		// provider; seed inflight with that count so the spinner runs until the
 		// initial sweep completes. With no providers there is nothing to wait for.
@@ -168,6 +177,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		childH := max(msg.Height-1, 1) // leave a row for the status/help line
 		m.feed.SetSize(msg.Width, childH)
 		m.reader.SetSize(msg.Width, childH)
+		// Re-render the open item at the new width so the reader re-wraps instead of
+		// keeping the previous width's layout. The body is already cached (the item is
+		// open), so a nil provider reads straight from the store — no network fetch.
+		if m.view == viewReader && m.openID != "" {
+			return m, loadBodyCmd(m.store, m.renderer, nil, m.openItem)
+		}
 		return m, nil
 	case itemsLoadedMsg:
 		return m, m.feed.SetItems(msg.items)
@@ -270,8 +285,18 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.view == viewFilter {
 		return m.handleFilterKey(msg)
 	}
+	// Any key outside the search bar dismisses a stale transient status (a sync or
+	// body error), so it does not linger; a fresh error arriving later re-sets it.
+	m.status = ""
 	if key.Matches(msg, m.keys.Quit) {
 		return m, tea.Quit
+	}
+	// Actions available from both the feed and the reader.
+	switch {
+	case key.Matches(msg, m.keys.OpenBrowser):
+		return m, m.openInBrowser()
+	case key.Matches(msg, m.keys.ForceSync):
+		return m.forceSync()
 	}
 
 	switch m.view {
@@ -284,6 +309,52 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m.routeToChild(msg)
+}
+
+// current returns the item the user is acting on: the open item while in the
+// reader, otherwise the selected feed row. The bool is false when there is none
+// (e.g. an empty feed).
+//
+// In the reader it returns m.openItem, a snapshot taken at open time. Its
+// immutable fields (ID, URL) are always current, but mutable fields such as Read
+// may lag the feed's optimistic flips — callers must not key off them. Today only
+// the URL is read (open-in-browser), so this is safe.
+func (m Model) current() (model.Item, bool) {
+	if m.view == viewReader && m.openID != "" {
+		return m.openItem, true
+	}
+	return m.feed.Selected()
+}
+
+// openInBrowser returns a command that opens the current item's permalink in the
+// system browser, surfacing any failure on the status line. It is a no-op (nil
+// command) when there is no current item or it has no URL.
+func (m Model) openInBrowser() tea.Cmd {
+	it, ok := m.current()
+	if !ok || it.URL == "" {
+		return nil
+	}
+	open, u := m.openURL, it.URL
+	return func() tea.Msg {
+		if err := open(u); err != nil {
+			return errMsg{err}
+		}
+		return nil
+	}
+}
+
+// forceSync requests an immediate engine sweep and re-lights the spinner for it,
+// reusing the inflight counter the sync-batch handler already drains. It is a
+// no-op while a sweep is already running (so inflight is not double-counted) or
+// when there are no sources / no engine wired.
+func (m Model) forceSync() (tea.Model, tea.Cmd) {
+	if m.syncing || m.triggerSync == nil || m.sources == 0 {
+		return m, nil
+	}
+	m.triggerSync()
+	m.syncing = true
+	m.inflight = m.sources
+	return m, m.spinner.Tick
 }
 
 // handleFeedKey handles the feed view's bindings: search, the quick filters, the
@@ -330,6 +401,7 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.openID = it.ID
+		m.openItem = it // retained for resize re-render and open-in-browser
 		m.reader.SetHeader(it)
 		// Clear any previous body so the prior item does not flash under the
 		// new header while this item's body renders asynchronously.

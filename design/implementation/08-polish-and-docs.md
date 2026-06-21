@@ -132,8 +132,38 @@ transient error (auto-clears after N seconds or on next key). Keep to one line.
 
 ## Done checklist
 
-- [ ] Help overlay, theming, resize, status bar, open-in-browser all working.
-- [ ] Coverage targets met; `-race` clean.
-- [ ] README + SETUP + CONFIG docs complete and accurate.
-- [ ] Makefile (+ optional CI) in place.
-- [ ] Full DESIGN.md §13 verification passes end-to-end.
+- [x] Help overlay, theming, resize, status bar, open-in-browser all working.
+- [x] Coverage targets met; `-race` clean.
+- [x] README + SETUP + CONFIG docs complete and accurate.
+- [x] Makefile in place (CI workflow intentionally skipped — see notes).
+- [x] Full DESIGN.md §13 verification passes end-to-end (manual smoke is the human step).
+
+## Implementation notes (deviations)
+
+- **Most UI machinery already existed** from Steps 04–07 (status bar, `?` short/full
+  help toggle via `m.help.ShowAll`, resize sizing of feed/reader, the Glamour renderer
+  width, `ShortHelp()`/`FullHelp()` on `KeyMap`). Step 08 filled the concrete gaps
+  rather than rebuilding: `o` open-in-browser, `R` force-sync, resize body re-render,
+  transient-error auto-clear, background-aware theming, and the docs.
+- **Help** stayed as the `bubbles/help` short/full toggle (the design's "or extend
+  bubbles/help usage" path), not a separate full-screen overlay view.
+- **Open-in-browser** uses `github.com/pkg/browser`; the opener is an injectable
+  `Model.openURL` field (default `browser.OpenURL`) so it is unit-testable. A unified
+  `current()` returns the open item in the reader or the selected row in the feed, so
+  `o` works from both views.
+- **Force-sync (`R`)** — DESIGN §6.7 lists it though the step doc did not; added an
+  engine `Trigger()` (a buffered, coalescing trigger channel `Run` selects on) wired
+  through `ui.New(..., eng.Trigger, ...)`. Pressing `R` re-lights the spinner by reusing
+  the existing `inflight` counter, and is a no-op while a sweep is already running. This
+  also gives the manual case the per-sweep spinner that automatic ticks still lack.
+- **Theming** — lipgloss v2 dropped `AdaptiveColor`; used `lipgloss.LightDark(dark)`
+  over the detected background instead, split into a testable `stylesForBackground`.
+- **Transient errors** clear on the next keypress (the design's "or on next key"
+  option), chosen over a tick-based timer for determinism.
+- **Consent-URL auto-open** — `gmail.Authorize` now best-effort `browser.OpenURL`s the
+  consent URL after printing it (the print remains the headless/SSH fallback).
+- **CI** (`.github/workflows/ci.yml`) intentionally **skipped** per decision; the
+  Makefile targets cover local build/vet/fmt/test.
+- **Coverage** was already ≥80% on every target package before this step; the new tests
+  cover the new behavior (engine trigger, `o`/`R`, resize re-render, status-clear,
+  both theme palettes) rather than backfilling.
