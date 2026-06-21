@@ -210,8 +210,32 @@ subcommand) still prints the config summary until step 04 launches the TUI.
 
 ## Done checklist
 
-- [ ] OPML import handles nested outlines; RSS provider fetches + maps entries.
-- [ ] Conditional GET (ETag/Last-Modified, 304 handling) implemented.
-- [ ] `feeds.BuildRSSProviders` builds providers from config + store state.
-- [ ] `renomail dump` prints a merged, persisted feed end-to-end.
-- [ ] Fixture tests + manual run green; `gofmt`/`vet`/`test` clean.
+- [x] OPML import handles nested outlines; RSS provider fetches + maps entries.
+- [x] Conditional GET (ETag/Last-Modified, 304 handling) implemented.
+- [x] `feeds.BuildRSSProviders` builds providers from config + store state.
+- [x] `renomail dump` prints a merged, persisted feed end-to-end.
+- [x] Fixture tests + manual run green; `gofmt`/`vet`/`test` clean.
+
+## Implementation notes (deviations from the snippets above)
+
+These are tactical refinements made during implementation; none change the
+`Provider` interface (DESIGN.md §4), so no DESIGN.md back-port was needed.
+
+- **`ImportOPML` returns `[]rss.FeedRef{Source, URL}`**, not `[]model.Source`.
+  `feedID` is a one-way hash, so the registry needs the URL alongside the Source
+  to construct a provider. `rss.NewFeedRef(url, title)` builds the same ref for a
+  one-off `[[feed]]`. `feeds.Provider` is a type alias for `rss.Provider`.
+- **`toItem` also sets `Item.NativeID`** (the guid|link), consistent with the
+  Step 02 `native_id` adoption — the doc snippet set only `ID`.
+- **Author comes from `e.Authors[0]`**, not the deprecated `gofeed.Item.Author`
+  (staticcheck flags the latter).
+- **`stripTags` uses the `golang.org/x/net/html` tokenizer** (entity unescaping +
+  block-boundary spacing), not a regex; `snippet` truncates rune-safely.
+- **HTTP clients carry a 30s timeout** (`dump`/registry), not `http.DefaultClient`.
+- **`runDump` threads an `io.Writer`** and `os.MkdirAll`s the data dir before
+  opening the store (first-run: the dir does not exist yet); the fetch→upsert→
+  query→print core is `dumpFeeds`, unit-tested via `httptest` + a temp store.
+- **`main.go` dispatch** is `dispatch(ctx, args, w)` switching on `args[0]`,
+  preserving a writer seam for tests; the no-arg path still prints the summary.
+- **Fixtures live in `internal/source/rss/testdata/`** (Go convention), not the
+  repo root.
