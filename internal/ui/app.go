@@ -6,15 +6,20 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/srhoton/renomail/internal/model"
 	"github.com/srhoton/renomail/internal/render"
+	"github.com/srhoton/renomail/internal/source"
 	"github.com/srhoton/renomail/internal/store"
+	"github.com/srhoton/renomail/internal/syncengine"
 	"github.com/srhoton/renomail/internal/ui/feed"
 	"github.com/srhoton/renomail/internal/ui/filterbar"
 	"github.com/srhoton/renomail/internal/ui/keys"
@@ -26,15 +31,15 @@ import (
 // WindowSizeMsg arrives with the real terminal size.
 const defaultWidth = 80
 
-// view enumerates the routable screens. viewHelp is reserved for a later step;
-// step 04 routed feed↔reader, and step 05 adds viewFilter for the search bar.
+// view enumerates the routable screens: the feed list, the reader, and the search
+// filter bar. Help is an in-place toggle on the feed (m.help.ShowAll), not a
+// separate screen.
 type view int
 
 const (
 	viewFeed view = iota
 	viewReader
 	viewFilter
-	viewHelp
 )
 
 // Model is the root application model. It routes messages to the active child
@@ -53,21 +58,47 @@ type Model struct {
 	openID    string // id of the item currently open in the reader (stale-load guard)
 	status    string
 	hint      string // cached status-bar filter description; refreshed only on filter change
+	helpView  string // cached help line; refreshed only on resize / help toggle
 	w, h      int
+
+	// background sync
+	events    <-chan syncengine.Result   // engine results, drained by waitForActivity
+	providers map[string]source.Provider // by source ID, for body-on-open fallback
+	hydrated  map[string]bool            // item ids whose body was loaded this session
+	spinner   spinner.Model              // shown while the initial sweep is in flight
+	lastSync  time.Time                  // when the most recent sync result arrived
+	syncing   bool                       // true until the initial sweep completes
+	inflight  int                        // providers still to report in the initial sweep
+	sources   int                        // total provider count, for the status indicator
 }
 
 // compile-time check that Model satisfies the Bubble Tea contract.
 var _ tea.Model = Model{}
 
-// New builds the root model over an open store. It initializes the render
-// pipeline, the feed and reader views, the key map, and help.
-func New(st *store.Store) (Model, error) {
+// New builds the root model over an open store, the background engine's events
+// channel, and the provider set. It initializes the render pipeline, the feed and
+// reader views, the key map, help, and the sync spinner. The providers are indexed
+// by source ID so the reader can fall back to a network body load on open; warns
+// (e.g. un-authorized Gmail accounts from provider construction) seed the status
+// line so the user sees them at startup.
+func New(
+	st *store.Store,
+	events <-chan syncengine.Result,
+	providers []source.Provider,
+	warns []error,
+) (Model, error) {
 	r, err := render.New(defaultWidth)
 	if err != nil {
 		return Model{}, err
 	}
 	theme := styles.DefaultStyles()
-	return Model{
+
+	byID := make(map[string]source.Provider, len(providers))
+	for _, p := range providers {
+		byID[p.ID()] = p
+	}
+
+	m := Model{
 		view:      viewFeed,
 		feed:      feed.New(theme),
 		reader:    reader.New(theme),
@@ -78,12 +109,52 @@ func New(st *store.Store) (Model, error) {
 		keys:      keys.Default(),
 		help:      help.New(),
 		theme:     theme,
-	}, nil
+		status:    warnStatus(warns),
+		events:    events,
+		providers: byID,
+		hydrated:  make(map[string]bool),
+		spinner:   spinner.New(),
+		sources:   len(providers),
+		// The engine runs an immediate first sweep emitting one result per
+		// provider; seed inflight with that count so the spinner runs until the
+		// initial sweep completes. With no providers there is nothing to wait for.
+		syncing:  len(providers) > 0,
+		inflight: len(providers),
+	}
+	m.refreshHelp()
+	return m, nil
 }
 
-// Init loads the cached items into the feed immediately, so the UI shows content
-// without waiting on any network sync.
-func (m Model) Init() tea.Cmd { return loadItemsCmd(m.store, m.filter) }
+// refreshHelp recomputes the cached help line. It is called only when the inputs
+// change — the help width (on resize) or the expanded/collapsed state (on toggle)
+// — so the per-frame statusBar never rebuilds it.
+func (m *Model) refreshHelp() { m.helpView = m.help.View(m.keys) }
+
+// warnStatus renders provider-construction warnings into a compact startup status
+// string (e.g. an un-authorized Gmail account prompting `renomail auth`). The
+// empty string when there are none keeps the status line clean.
+func warnStatus(warns []error) string {
+	if len(warns) == 0 {
+		return ""
+	}
+	msgs := make([]string, 0, len(warns))
+	for _, w := range warns {
+		msgs = append(msgs, w.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// Init loads the cached items into the feed immediately (so the UI shows content
+// without waiting on any network sync), begins draining the engine's results, and
+// starts the spinner for the initial sweep. inflight is seeded with the provider
+// count so the spinner stops once every provider has reported once.
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		loadItemsCmd(m.store, m.filter),
+		waitForActivity(m.events),
+		m.spinner.Tick,
+	)
+}
 
 // Update handles framework and application messages, then routes the remainder to
 // the active child view.
@@ -93,6 +164,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.w, m.h = msg.Width, msg.Height
 		_ = m.renderer.SetWidth(msg.Width)
 		m.help.SetWidth(msg.Width)
+		m.refreshHelp()
 		childH := max(msg.Height-1, 1) // leave a row for the status/help line
 		m.feed.SetSize(msg.Width, childH)
 		m.reader.SetSize(msg.Width, childH)
@@ -110,6 +182,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = msg.err.Error()
 			return m, nil
 		}
+		// Mark the item hydrated for this session so re-opening it renders straight
+		// from the store cache instead of re-hitting the provider — important for
+		// genuinely body-less mail, whose empty cached body is otherwise
+		// indistinguishable from "never fetched".
+		m.hydrated[msg.id] = true
 		m.reader.SetContent(msg.rendered)
 		return m, nil
 	case errMsg:
@@ -132,10 +209,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case reloadMsg:
 		return m, loadItemsCmd(m.store, m.filter)
+	case spinner.TickMsg:
+		// Only advance the spinner while a sweep is in flight; once it stops the
+		// tick loop ends (we stop returning the next tick command), so the status
+		// bar settles on the "synced N ago" indicator.
+		if !m.syncing {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	case syncBatchMsg:
+		return m.handleSyncBatch(msg)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
 	return m.routeToChild(msg)
+}
+
+// handleSyncBatch folds one provider's sweep result into the model: it records the
+// sync time, surfaces a fetch error to the status line (without crashing), and
+// re-queries the feed when new items arrived (the engine already upserted them). It
+// tracks the initial sweep's progress so the spinner stops once every provider has
+// reported, and always re-arms the listener so the results stream keeps draining.
+//
+// During the initial sweep the per-provider re-queries are coalesced into a single
+// query once the whole sweep has reported, rather than one full table scan per
+// provider; steady-state ticks (a single provider reporting) re-query inline.
+func (m Model) handleSyncBatch(msg syncBatchMsg) (tea.Model, tea.Cmd) {
+	r := msg.res
+	m.lastSync = time.Now()
+	initialSweep := m.inflight > 0
+	if m.inflight > 0 {
+		m.inflight--
+		if m.inflight == 0 {
+			m.syncing = false
+		}
+	}
+
+	cmds := []tea.Cmd{waitForActivity(m.events)}
+	if r.Err != nil {
+		m.status = fmt.Sprintf("sync %s: %v", r.SourceName, r.Err)
+	}
+	switch {
+	case initialSweep && m.inflight == 0:
+		// Whole initial sweep has reported: one re-query covers every provider's items.
+		cmds = append(cmds, loadItemsCmd(m.store, m.filter))
+	case !initialSweep && len(r.Items) > 0:
+		cmds = append(cmds, loadItemsCmd(m.store, m.filter))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // handleKey applies the key bindings for the active view. The filter view is
@@ -171,6 +294,7 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
+		m.refreshHelp()
 		return m, nil
 	case key.Matches(msg, m.keys.Search):
 		// Pre-fill the bar with the active term so the user edits rather than
@@ -211,7 +335,16 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// new header while this item's body renders asynchronously.
 		m.reader.SetContent("")
 		m.view = viewReader
-		cmds := []tea.Cmd{loadBodyCmd(m.store, m.renderer, it)}
+		// Pass the item's provider so the body load can fall back to a network
+		// fetch when the stored body is empty (Gmail). A nil entry (RSS, or an
+		// unknown source) skips the fallback — RSS bodies are already cached — as
+		// does an item already hydrated this session, so a repeat open never re-hits
+		// the network.
+		prov := m.providers[it.SourceID]
+		if m.hydrated[it.ID] {
+			prov = nil
+		}
+		cmds := []tea.Cmd{loadBodyCmd(m.store, m.renderer, prov, it)}
 		// Opening an item marks it read (DESIGN §6.5): flip the row now (by id, the
 		// same stale-safe path used everywhere else) so the dot updates on return,
 		// and persist the flag in the background.
@@ -286,12 +419,18 @@ func (m Model) View() tea.View {
 	return v
 }
 
-// statusBar renders the help line, prefixed with the active filter hint and the
-// last status/error message when present. It uses the theme cached on the model
-// rather than rebuilding it.
+// statusBar renders the help line, prefixed with the sync indicator, the active
+// filter hint, and the last status/error message when present. It uses the theme
+// cached on the model rather than rebuilding it.
 func (m Model) statusBar() string {
-	helpLine := m.help.View(m.keys)
+	helpLine := m.helpView
 	left := m.status
+	if sync := m.syncStatus(); sync != "" {
+		if left != "" {
+			left += "  "
+		}
+		left += sync
+	}
 	if m.hint != "" {
 		if left != "" {
 			left += "  "
@@ -302,6 +441,41 @@ func (m Model) statusBar() string {
 		return helpLine
 	}
 	return m.theme.StatusBar.Render(left) + "  " + helpLine
+}
+
+// syncStatus renders the background-sync indicator: a spinner while the initial
+// sweep is in flight, otherwise "synced <rel> ago · N sources" once a result has
+// arrived. It is empty before the first result (and when there are no sources).
+func (m Model) syncStatus() string {
+	if m.sources == 0 {
+		return ""
+	}
+	if m.syncing {
+		return fmt.Sprintf("%s syncing… · %d sources", m.spinner.View(), m.sources)
+	}
+	if m.lastSync.IsZero() {
+		return ""
+	}
+	rel := relTime(time.Since(m.lastSync))
+	if rel == "just now" {
+		return fmt.Sprintf("synced just now · %d sources", m.sources)
+	}
+	return fmt.Sprintf("synced %s ago · %d sources", rel, m.sources)
+}
+
+// relTime renders a short, human relative duration for the status bar: "just now"
+// under five seconds, then seconds, minutes, or hours.
+func relTime(d time.Duration) string {
+	switch {
+	case d < 5*time.Second:
+		return "just now"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
 }
 
 // filterHint renders the active filter compactly, e.g. `rss · unread · "k8s"`, so

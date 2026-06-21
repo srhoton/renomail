@@ -10,7 +10,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,6 +255,68 @@ func TestFetch_listsAndMapsMessages(t *testing.T) {
 	}
 }
 
+// TestFetch_concurrentGets_orderedAndBounded verifies the two-phase Fetch: the
+// per-message metadata Gets run concurrently (peak in-flight bounded by
+// fetchConcurrency) yet the returned items keep the list order regardless of the
+// order the concurrent Gets complete.
+func TestFetch_concurrentGets_orderedAndBounded(t *testing.T) {
+	const n = 25
+	var inflight, peak atomic.Int32
+
+	msgs := make([]*gmailapi.Message, 0, n)
+	for i := range n {
+		msgs = append(msgs, &gmailapi.Message{Id: "m" + strconv.Itoa(i)})
+	}
+
+	svc := gmailTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/messages"):
+			_ = json.NewEncoder(w).Encode(&gmailapi.ListMessagesResponse{Messages: msgs})
+		case strings.Contains(r.URL.Path, "/messages/"):
+			cur := inflight.Add(1)
+			for {
+				old := peak.Load()
+				if cur <= old || peak.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			time.Sleep(5 * time.Millisecond) // widen the concurrency window
+			inflight.Add(-1)
+			id := path.Base(r.URL.Path)
+			_ = json.NewEncoder(w).Encode(&gmailapi.Message{
+				Id: id,
+				Payload: &gmailapi.MessagePart{Headers: []*gmailapi.MessagePartHeader{
+					{Name: "Subject", Value: "Subject " + id},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	p := newWithService("me@example.com", svc, time.Hour)
+	items, err := p.Fetch(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(items) != n {
+		t.Fatalf("got %d items, want %d", len(items), n)
+	}
+	for i, it := range items {
+		want := "Subject m" + strconv.Itoa(i)
+		if it.Title != want {
+			t.Fatalf("items[%d].Title = %q, want %q (order not preserved)", i, it.Title, want)
+		}
+	}
+	if got := peak.Load(); got > fetchConcurrency {
+		t.Errorf("peak concurrent Gets = %d, want <= fetchConcurrency (%d)", got, fetchConcurrency)
+	}
+	if peak.Load() < 2 {
+		t.Errorf("peak concurrent Gets = %d, want > 1 (Gets should overlap)", peak.Load())
+	}
+}
+
 func TestFetch_listError_propagates(t *testing.T) {
 	svc := gmailTestService(t, func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
@@ -260,6 +324,47 @@ func TestFetch_listError_propagates(t *testing.T) {
 	p := newWithService("me@example.com", svc, time.Hour)
 	if _, err := p.Fetch(context.Background(), time.Time{}); err == nil {
 		t.Error("Fetch error = nil, want propagated list error")
+	}
+}
+
+// TestFetch_partialGetFailure_returnsFetchedAndError verifies resilience: when one
+// per-message Get fails, Fetch still returns the messages it did fetch (in list
+// order) alongside the error, rather than discarding the whole batch.
+func TestFetch_partialGetFailure_returnsFetchedAndError(t *testing.T) {
+	svc := gmailTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/messages"):
+			_ = json.NewEncoder(w).Encode(&gmailapi.ListMessagesResponse{
+				Messages: []*gmailapi.Message{{Id: "m1"}, {Id: "m2"}, {Id: "m3"}},
+			})
+		case strings.Contains(r.URL.Path, "/messages/"):
+			id := path.Base(r.URL.Path)
+			if id == "m2" {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(&gmailapi.Message{
+				Id: id,
+				Payload: &gmailapi.MessagePart{Headers: []*gmailapi.MessagePartHeader{
+					{Name: "Subject", Value: "Subject " + id},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	p := newWithService("me@example.com", svc, time.Hour)
+	items, err := p.Fetch(context.Background(), time.Time{})
+	if err == nil {
+		t.Fatal("Fetch error = nil, want the failed Get surfaced")
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want the 2 that succeeded (m1, m3)", len(items))
+	}
+	if items[0].Title != "Subject m1" || items[1].Title != "Subject m3" {
+		t.Errorf("partial result order wrong: %q, %q", items[0].Title, items[1].Title)
 	}
 }
 

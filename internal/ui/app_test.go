@@ -12,8 +12,49 @@ import (
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
 	"github.com/srhoton/renomail/internal/model"
+	"github.com/srhoton/renomail/internal/render"
+	"github.com/srhoton/renomail/internal/source"
 	"github.com/srhoton/renomail/internal/store"
+	"github.com/srhoton/renomail/internal/syncengine"
 )
+
+// newSeededStore opens a fresh temp-dir store with no items, for tests that upsert
+// their own fixtures.
+func newSeededStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "ui.db"))
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// mustRenderer builds the markdown renderer used by the body-load tests.
+func mustRenderer(t *testing.T) *render.Renderer {
+	t.Helper()
+	r, err := render.New(defaultWidth)
+	if err != nil {
+		t.Fatalf("render.New() error = %v", err)
+	}
+	return r
+}
+
+// stubProvider is a source.Provider whose Body fills the item from memory, used to
+// exercise the reader's network body-on-open fallback without a real network.
+type stubProvider struct {
+	id   string
+	body string
+}
+
+func (s stubProvider) ID() string                                             { return s.id }
+func (s stubProvider) Name() string                                           { return s.id }
+func (s stubProvider) Kind() model.Kind                                       { return model.KindEmail }
+func (s stubProvider) Fetch(context.Context, time.Time) ([]model.Item, error) { return nil, nil }
+func (s stubProvider) Body(_ context.Context, it *model.Item) error {
+	it.BodyText = s.body
+	return nil
+}
 
 // seedItems are two items — one unread, one read — used across the UI tests.
 func seedItems() []model.Item {
@@ -44,7 +85,7 @@ func newSeededModel(t *testing.T) (Model, *store.Store) {
 	if err := st.UpsertItems(context.Background(), seedItems()); err != nil {
 		t.Fatalf("UpsertItems() error = %v", err)
 	}
-	m, err := New(st)
+	m, err := New(st, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -202,7 +243,7 @@ func TestView_rendersFeedThenReader(t *testing.T) {
 func TestLoadBodyCmd_hydratesAndRenders(t *testing.T) {
 	m, st := newSeededModel(t)
 
-	msg := loadBodyCmd(st, m.renderer, model.Item{ID: "a"})()
+	msg := loadBodyCmd(st, m.renderer, nil, model.Item{ID: "a"})()
 	bl, ok := msg.(bodyLoadedMsg)
 	if !ok {
 		t.Fatalf("loadBodyCmd produced %T, want bodyLoadedMsg", msg)
@@ -218,13 +259,118 @@ func TestLoadBodyCmd_hydratesAndRenders(t *testing.T) {
 func TestLoadBodyCmd_missingItem_returnsError(t *testing.T) {
 	m, st := newSeededModel(t)
 
-	msg := loadBodyCmd(st, m.renderer, model.Item{ID: "does-not-exist"})()
+	msg := loadBodyCmd(st, m.renderer, nil, model.Item{ID: "does-not-exist"})()
 	bl, ok := msg.(bodyLoadedMsg)
 	if !ok {
 		t.Fatalf("loadBodyCmd produced %T, want bodyLoadedMsg", msg)
 	}
 	if bl.err == nil {
 		t.Error("loadBodyCmd err = nil, want error for missing item")
+	}
+}
+
+// TestLoadBodyCmd_emptyStoredBody_fallsBackToProvider covers the Gmail body-on-open
+// path: an item stored without a body triggers the provider's network Body load,
+// the rendered output reflects it, and the body is cached in the store for next time.
+func TestLoadBodyCmd_emptyStoredBody_fallsBackToProvider(t *testing.T) {
+	ctx := context.Background()
+	st := newSeededStore(t)
+	// A body-less item, as Gmail's Fetch stores it.
+	bodyless := model.Item{
+		ID: "mail1", Kind: model.KindEmail, SourceID: "gmail:me", SourceName: "me",
+		Title: "Mail", NativeID: "n1", Published: time.Now(),
+	}
+	if err := st.UpsertItems(ctx, []model.Item{bodyless}); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+	r := mustRenderer(t)
+	// A single token, so the renderer's per-word ANSI styling cannot split it.
+	const marker = "fetchedbodymarker"
+	prov := stubProvider{id: "gmail:me", body: marker}
+
+	msg := loadBodyCmd(st, r, prov, bodyless)()
+	bl, ok := msg.(bodyLoadedMsg)
+	if !ok || bl.err != nil {
+		t.Fatalf("loadBodyCmd msg = %#v (ok=%v), want a clean bodyLoadedMsg", msg, ok)
+	}
+	if !strings.Contains(bl.rendered, marker) {
+		t.Errorf("rendered body missing provider text: %q", bl.rendered)
+	}
+	// The body must now be cached, so a subsequent store read returns it.
+	_, text, err := st.GetBody(ctx, "mail1")
+	if err != nil {
+		t.Fatalf("GetBody: %v", err)
+	}
+	if !strings.Contains(text, marker) {
+		t.Errorf("body not cached after fallback: %q", text)
+	}
+}
+
+func TestUpdate_syncBatch_withItems_requeriesAndKeepsRunning(t *testing.T) {
+	m, _ := newSeededModel(t)
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	res := syncengine.Result{SourceID: "a", SourceName: "Feed A", Items: seedItems()}
+	m, cmd := step(t, m, syncBatchMsg{res})
+
+	if cmd == nil {
+		t.Fatal("syncBatchMsg returned nil cmd, want re-query + re-armed listener")
+	}
+	if m.lastSync.IsZero() {
+		t.Error("lastSync not recorded after a sync batch")
+	}
+	if m.status != "" {
+		t.Errorf("status = %q, want empty on a successful batch", m.status)
+	}
+}
+
+func TestUpdate_syncBatch_withError_setsStatusAndDoesNotPanic(t *testing.T) {
+	m, _ := newSeededModel(t)
+
+	res := syncengine.Result{SourceID: "b", SourceName: "Feed B", Err: errors.New("boom")}
+	m, cmd := step(t, m, syncBatchMsg{res})
+
+	if cmd == nil {
+		t.Fatal("syncBatchMsg(err) returned nil cmd, want a re-armed listener")
+	}
+	if !strings.Contains(m.status, "Feed B") || !strings.Contains(m.status, "boom") {
+		t.Errorf("status = %q, want it to surface the source name and error", m.status)
+	}
+}
+
+func TestUpdate_syncBatch_initialSweepStopsSpinner(t *testing.T) {
+	st := newSeededStore(t)
+	prov := stubProvider{id: "gmail:me", body: "x"}
+	m, err := New(st, make(chan syncengine.Result), []source.Provider{prov}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !m.syncing || m.inflight != 1 {
+		t.Fatalf("initial state syncing=%v inflight=%d, want true/1", m.syncing, m.inflight)
+	}
+
+	res := syncengine.Result{SourceID: "gmail:me", SourceName: "me"}
+	m, _ = step(t, m, syncBatchMsg{res})
+
+	if m.syncing || m.inflight != 0 {
+		t.Errorf("after the only provider reported: syncing=%v inflight=%d, want false/0", m.syncing, m.inflight)
+	}
+}
+
+func TestRelTime(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{2 * time.Second, "just now"},
+		{30 * time.Second, "30s"},
+		{5 * time.Minute, "5m"},
+		{3 * time.Hour, "3h"},
+	}
+	for _, tt := range tests {
+		if got := relTime(tt.d); got != tt.want {
+			t.Errorf("relTime(%v) = %q, want %q", tt.d, got, tt.want)
+		}
 	}
 }
 

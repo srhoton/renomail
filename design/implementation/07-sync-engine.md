@@ -206,9 +206,40 @@ func runTUI(cfg config.Config, paths config.Paths) error {
 
 ## Done checklist
 
-- [ ] Concurrent bounded initial sweep + periodic ticker re-sync.
-- [ ] Results upserted + per-source state persisted; UI re-queries on new items.
-- [ ] One failing source degrades gracefully (status line, others unaffected).
-- [ ] Spinner + last-sync indicator wired.
-- [ ] Mock-provider + UI tests pass; manual run verified; `gofmt`/`vet`/`test`
-      green.
+- [x] Concurrent bounded initial sweep + periodic ticker re-sync.
+- [x] Results upserted + per-source state persisted; UI re-queries on new items.
+- [x] One failing source degrades gracefully (status line, others unaffected).
+- [x] Spinner + last-sync indicator wired.
+- [x] Mock-provider + UI tests pass; `gofmt`/`vet`/`test -race` green. (Manual run
+      is the human smoke step in Validation above — not run here.)
+
+## Implementation notes (deviations)
+
+- **Bounded fan-out via `errgroup.SetLimit`**, not the doc's hand-rolled
+  `sem + WaitGroup`. `golang.org/x/sync` was already a (transitive) dependency;
+  `go mod tidy` promoted it to direct. Errors travel in each `Result`, so the
+  group's `Go` funcs always return nil and `Wait`'s error is ignored.
+- **Per-source state is shared, not duplicated.** The ad-hoc
+  `sourceStateful`/`sourceStateOf` helper from `dump.go` was extracted to
+  `source.Stateful` + `source.StateOf(p, now)` so the engine and `dump` persist
+  state identically. `persistSourceState` runs even on a fetch error so a transient
+  failure does not reset the incremental window.
+- **Provider build extracted to `cmd/renomail/providers.go`** (`buildProviders`),
+  shared by `dump` and the TUI, replacing the per-command RSS+Gmail concatenation.
+- **Carryovers from Step 06 closed here:**
+  - *Live Gmail body-on-open:* `loadBodyCmd` now takes the item's `source.Provider`
+    (looked up by source ID in the model) and, when the stored body is empty, falls
+    back to `provider.Body()` and caches the result via `store.SetBody`. RSS bodies
+    are already stored, so the fallback only fires for Gmail.
+  - *Bounded-concurrency Gmail `Fetch`:* listing now collects message ids first,
+    then fetches the per-message metadata concurrently (bounded at 8) into a
+    position-indexed slice — order preserved, cold-start latency cut. This resolves
+    the HIGH finding deferred from the Step 06 review.
+- **Spinner scope:** the spinner runs during the **initial** sweep (tracked by an
+  `inflight` counter seeded with the provider count). The engine emits one `Result`
+  per provider but no explicit sweep-start signal, so periodic re-syncs refresh the
+  "synced N ago · M sources" indicator without re-lighting the spinner. Adding a
+  sweep-start phase to `Result` for a per-tick spinner is left for later.
+- **Engine context ownership:** `runTUI` owns the `context.WithCancel`; cancelling
+  it on exit lets `Run` close the events channel so the UI's `waitForActivity`
+  listener unblocks with a nil message and the loop ends cleanly.

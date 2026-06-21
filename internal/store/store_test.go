@@ -454,6 +454,45 @@ func TestUpsertGetSource_roundTrip(t *testing.T) {
 	}
 }
 
+func TestUpsertSources_batchAndEmptyNoop(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertSources(ctx, nil); err != nil {
+		t.Fatalf("UpsertSources(nil) = %v, want nil no-op", err)
+	}
+
+	srcs := []model.Source{
+		{ID: "rss:a", Name: "A", Kind: model.KindRSS, LastSync: at(100), ETag: `"a"`},
+		{ID: "gmail:b", Name: "b", Kind: model.KindEmail, LastSync: at(200)},
+	}
+	if err := s.UpsertSources(ctx, srcs); err != nil {
+		t.Fatalf("UpsertSources: %v", err)
+	}
+
+	for _, want := range srcs {
+		got, ok, err := s.GetSource(ctx, want.ID)
+		if err != nil || !ok {
+			t.Fatalf("GetSource(%s) ok=%v err=%v", want.ID, ok, err)
+		}
+		if got.Name != want.Name || got.Kind != want.Kind || got.ETag != want.ETag ||
+			!got.LastSync.Equal(want.LastSync) {
+			t.Errorf("source %s = %+v, want %+v", want.ID, got, want)
+		}
+	}
+
+	// A second batch must update existing rows (conflict path).
+	srcs[0].Name = "A renamed"
+	srcs[0].LastSync = at(999)
+	if err := s.UpsertSources(ctx, srcs[:1]); err != nil {
+		t.Fatalf("UpsertSources update: %v", err)
+	}
+	got, _, _ := s.GetSource(ctx, "rss:a")
+	if got.Name != "A renamed" || !got.LastSync.Equal(at(999)) {
+		t.Errorf("batch conflict update failed: %+v", got)
+	}
+}
+
 func TestUpsertItems_emptySliceNoop(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.UpsertItems(context.Background(), nil); err != nil {

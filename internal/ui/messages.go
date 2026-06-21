@@ -7,7 +7,9 @@ import (
 
 	"github.com/srhoton/renomail/internal/model"
 	"github.com/srhoton/renomail/internal/render"
+	"github.com/srhoton/renomail/internal/source"
 	"github.com/srhoton/renomail/internal/store"
+	"github.com/srhoton/renomail/internal/syncengine"
 )
 
 // itemsLoadedMsg carries the result of a store query into the feed.
@@ -38,6 +40,25 @@ type readToggledMsg struct {
 // after the write completes, rather than racing it.
 type reloadMsg struct{}
 
+// syncBatchMsg carries one provider's sync outcome from the background engine
+// into the model. The engine has already upserted the items; the model only needs
+// to surface the error or re-query the visible feed.
+type syncBatchMsg struct{ res syncengine.Result }
+
+// waitForActivity blocks on the engine's events channel and converts the next
+// Result into a syncBatchMsg. The model re-arms it after each delivery so the
+// stream is drained continuously without a global program reference. A closed
+// channel (engine shut down) yields a nil msg, which stops the loop.
+func waitForActivity(ch <-chan syncengine.Result) tea.Cmd {
+	return func() tea.Msg {
+		res, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return syncBatchMsg{res}
+	}
+}
+
 // loadItemsCmd queries the store off the UI goroutine and returns the matching
 // items, newest first. A query failure becomes an errMsg so the UI can surface it
 // without blocking.
@@ -51,16 +72,26 @@ func loadItemsCmd(st *store.Store, f model.Filter) tea.Cmd {
 	}
 }
 
-// loadBodyCmd hydrates an item's body from the store and renders it. The list
-// query returns body-less items (the store omits bodies from list columns), so
-// the body must be fetched here before rendering — this is the lazy body-load the
-// design intends, and the seam the Gmail provider will reuse for network-fetched
-// bodies. A missing or already-present BodyText falls back gracefully.
-func loadBodyCmd(st *store.Store, r *render.Renderer, it model.Item) tea.Cmd {
+// loadBodyCmd hydrates an item's body and renders it. The list query returns
+// body-less items (the store omits bodies from list columns), so the body is
+// fetched here before rendering. It first reads the store; when the stored body
+// is empty and a provider is known for the item (Gmail stores body-less rows on
+// Fetch), it falls back to the provider's network Body load and caches the result
+// via SetBody so the next open is instant. RSS bodies are already stored, so the
+// fallback never fires for them. The cache write is best-effort — a failed cache
+// must not block rendering the body we just fetched.
+func loadBodyCmd(st *store.Store, r *render.Renderer, prov source.Provider, it model.Item) tea.Cmd {
 	return func() tea.Msg {
 		html, text, err := st.GetBody(context.Background(), it.ID)
 		if err != nil {
 			return bodyLoadedMsg{id: it.ID, err: err}
+		}
+		if html == "" && text == "" && prov != nil {
+			if berr := prov.Body(context.Background(), &it); berr != nil {
+				return bodyLoadedMsg{id: it.ID, err: berr}
+			}
+			html, text = it.BodyHTML, it.BodyText
+			_ = st.SetBody(context.Background(), it.ID, html, text)
 		}
 		it.BodyHTML, it.BodyText = html, text
 		out, err := r.Render(it)
