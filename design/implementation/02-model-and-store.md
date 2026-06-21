@@ -32,6 +32,13 @@ go get modernc.org/sqlite@latest
 Mirror `DESIGN.md` §3 exactly. Add the stable-ID helper that providers use so the
 same message/entry always maps to the same row (enables idempotent upserts).
 
+> **`native_id` adopted in this step.** `Item` carries a `NativeID string`
+> (Gmail message id / RSS guid|link) and the `items` table a matching
+> `native_id TEXT` column, so Gmail's lazy `Body()` (step 06) recovers the
+> message id directly rather than parsing the web URL. This resolves the open
+> item flagged in `06-gmail-oauth.md`; the schema ships with it from v1 (no
+> migration needed). `DESIGN.md` §3/§5 are updated to match.
+
 ```go
 type Kind string
 const (
@@ -55,6 +62,7 @@ type Item struct {
     Title      string
     Snippet    string
     URL        string
+    NativeID   string // Gmail message id / RSS guid|link
     Published  time.Time
     Fetched    time.Time
     Read       bool

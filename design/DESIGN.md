@@ -99,6 +99,7 @@ type Item struct {
     Title      string    // Subject / entry title
     Snippet    string    // short preview for the list row
     URL        string    // permalink (RSS) or Gmail web deep-link (email)
+    NativeID   string    // provider's native id: Gmail message id / RSS guid|link
     Published  time.Time // sort key (desc)
     Fetched    time.Time
     Read       bool      // LOCAL state only
@@ -184,7 +185,7 @@ Pure-Go `modernc.org/sqlite`. DB at `~/.local/share/renomail/renomail.db`
 ```sql
 CREATE TABLE items (
   id TEXT PRIMARY KEY, kind TEXT, source_id TEXT, source_name TEXT,
-  author TEXT, title TEXT, snippet TEXT, url TEXT,
+  author TEXT, title TEXT, snippet TEXT, url TEXT, native_id TEXT,
   published INTEGER, fetched INTEGER,
   read INTEGER DEFAULT 0, body_html TEXT, body_text TEXT
 );
