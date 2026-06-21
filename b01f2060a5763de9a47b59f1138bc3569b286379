@@ -1,0 +1,97 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 7?
+    (plan mode) -- produced a plan for Step 07 (design/implementation/
+    07-sync-engine.md). Research-first pass (3 Explore agents) mapped the seams:
+    the TUI build path (cmd/renomail/tui.go buildTUI, which did not build
+    providers), ui.New / Init / loadBodyCmd (store-only body load), the
+    dump.go sourceStateful/sourceStateOf helper + RSS+Gmail concatenation to
+    extract, config.SyncEvery()/LookbackDuration(), the store API
+    (GetSource/UpsertSource/SetBody), and that golang.org/x/sync was already a
+    (transitive) dep. Verified the bubbles v2 spinner + errgroup APIs via
+    `go doc` before wiring. Asked one scope question; user chose "Engine + both
+    carryovers" (sync engine + live Gmail body-on-open + bounded-concurrency
+    Gmail Fetch). Plan approved.
+
+[2] /review -- four-reviewer pass (functional, code-quality, ADR, performance)
+    on the Step 07 changes, then a re-review after fixes.
+
+[3] Fix all  (in response to /review's fix prompt)
+    -- fix every CRITICAL/HIGH/MEDIUM/LOW finding (10 total).
+
+[4] /trueup -- commit the work, add the session prompts via git notes, push,
+    and open a PR via the GitHub CLI whose description reflects a full diff
+    against the base branch.
+
+Work performed
+--------------
+- internal/syncengine (new package, replaced doc.go stub):
+  - engine.go: Result, Engine, New, Events, Run (immediate sweep + ticker,
+    closes channel on ctx cancel), syncAll (errgroup.SetLimit(8); since =
+    stored LastSync; partial items upserted; LastSync advanced only on success
+    via a single pre-fetch high-water mark; successful source state batched into
+    one UpsertSources tx), sinceFor.
+- internal/source/source.go: extracted Stateful interface + StateOf(p, now)
+  helper (shared by engine and dump).
+- internal/source/gmail/gmail.go: two-phase Fetch (page ids -> bounded-
+  concurrent metadata Gets into a position-indexed slice); plain errgroup so one
+  failed Get does not cancel the others; partial results harvested in list order
+  and returned with the first error; corrected concurrency comment; documented
+  inclusive after: boundary.
+- internal/ui:
+  - messages.go: syncBatchMsg + waitForActivity; loadBodyCmd provider fallback
+    + SetBody cache.
+  - app.go: New(st, events, providers, warns); Model gains spinner, lastSync,
+    syncing/inflight/sources, providers map, hydrated set, cached helpView;
+    Init batch; spinner.TickMsg + syncBatchMsg handling (coalesced initial-sweep
+    re-query); Open passes provider (skipped when hydrated); statusBar spinner/
+    last-sync + relTime; removed unused viewHelp.
+- internal/store/store.go: UpsertSources (batch, single tx; shared
+  upsertSourceSQL const with UpsertSource).
+- cmd/renomail: providers.go (buildProviders, shared by dump + tui); tui.go
+  (engine launch, ctx ownership, ui.New wiring); dump.go (uses buildProviders +
+  source.StateOf).
+- design/implementation/07-sync-engine.md: checklist ticked + deviation notes.
+- go.mod: golang.org/x/sync promoted to direct.
+
+Review (one fix iteration)
+--------------------------
+- First pass: functional APPROVED; quality PASS; ADR N/A (0/13 apply);
+  performance FAIL with two HIGH + MEDIUM/LOW. Fixed all ten:
+  1. HIGH: LastSync data-loss -- a failed fetch advanced LastSync and silently
+     skipped the un-fetched window. Fixed: capture now once at sweep start;
+     advance per-source state only on success; on error leave LastSync so the
+     next sweep retries. Two new engine tests.
+  2. HIGH: Gmail Fetch discarded the whole batch on one failed Get + misleading
+     "transitively caps" comment. Fixed: plain errgroup harvests partial results
+     in order, returns them with the first error; comment corrected to state the
+     real ceiling = engine fan-out x fetchConcurrency. New partial-failure test.
+  3. MEDIUM: redundant full re-query per provider per sweep -> coalesced into one
+     query when the initial sweep completes.
+  4. LOW: removed dead assignment in messages.go.
+  5. LOW: documented drop-Result-on-cancel in syncAll.
+  6. LOW: removed unused viewHelp + fixed the view enum godoc.
+  7. LOW: session hydrated set so body-less Gmail mail is not re-fetched on every
+     open.
+  8. LOW: commented the inclusive after: boundary re-fetch.
+  9. LOW: cached the help line (helpView), refreshed only on resize/toggle.
+  10. LOW: batched per-sweep source-state writes into one transaction
+      (store.UpsertSources + test).
+- Re-review: functional APPROVED, quality PASS, performance PASS (ADR re-run
+  skipped as definitively N/A).
+
+Decisions
+---------
+- Step 07 branched from origin/main (not the step-06 branch, which was squash-
+  merged via PR #7) so the PR diff shows only Step 07.
+- LastSync advances only on a fully successful fetch+upsert; partial results are
+  persisted but do not advance the window (self-healing incremental sync).
+- Gmail uses a plain errgroup (no derived context) for partial-result harvest;
+  the documented process-wide Gmail Get ceiling is maxConc(8) x
+  fetchConcurrency(8) = 64, acceptable for a personal reader's few accounts.
+- Spinner runs during the initial sweep only (inflight counter); periodic sweeps
+  refresh the "synced N ago" timestamp without re-lighting it (a sweep-start
+  signal for a per-tick spinner is left for later).
+- No native_id / schema change; engine does not import the UI (emits plain
+  Results adapted by the UI).
