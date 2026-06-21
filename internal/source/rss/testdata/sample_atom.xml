@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom Feed</title>
+  <link href="https://atom.example.com/"/>
+  <updated>2006-01-02T15:04:05Z</updated>
+  <id>urn:uuid:atom-example</id>
+  <entry>
+    <title>Atom Entry One</title>
+    <link href="https://atom.example.com/entry/1"/>
+    <id>urn:uuid:atom-entry-1</id>
+    <updated>2006-01-02T15:04:05Z</updated>
+    <author><name>Bob</name></author>
+    <content type="html">&lt;p&gt;Atom &lt;i&gt;content&lt;/i&gt; one.&lt;/p&gt;</content>
+  </entry>
+</feed>

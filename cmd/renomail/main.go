@@ -1,10 +1,12 @@
 // Command renomail is the entrypoint for the renomail TUI. For now it resolves
-// the application paths, loads the config, and prints a one-line summary so the
-// scaffold is verifiably wired end to end. Later steps replace the body with the
-// "dump" debug subcommand (step 03) and the TUI launch (step 04).
+// the application paths, loads the config, and either runs the "dump" debug
+// subcommand (step 03) or prints a one-line summary so the scaffold is verifiably
+// wired end to end. A later step replaces the default body with the TUI launch
+// (step 04).
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -13,15 +15,17 @@ import (
 )
 
 func main() {
-	if err := run(os.Stdout); err != nil {
+	if err := dispatch(context.Background(), os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-// run resolves paths, loads the config, and writes the summary to w. It is kept
-// separate from main so it can be exercised in tests without spawning a process.
-func run(w io.Writer) error {
+// dispatch resolves paths and config once, then routes to a subcommand. It is
+// kept separate from main so it can be exercised in tests without spawning a
+// process. The only subcommand today is "dump"; anything else (including no
+// arguments) prints the config summary.
+func dispatch(ctx context.Context, args []string, w io.Writer) error {
 	paths, err := config.ResolvePaths()
 	if err != nil {
 		return err
@@ -30,7 +34,16 @@ func run(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "renomail: %d gmail account(s), %d opml file(s), %d feed(s)\n",
+
+	if len(args) > 0 && args[0] == "dump" {
+		return runDump(ctx, cfg, paths, w)
+	}
+	return summarize(w, cfg)
+}
+
+// summarize writes the one-line config summary to w.
+func summarize(w io.Writer, cfg config.Config) error {
+	_, err := fmt.Fprintf(w, "renomail: %d gmail account(s), %d opml file(s), %d feed(s)\n",
 		len(cfg.Gmail), len(cfg.OPML), len(cfg.Feed))
 	return err
 }
