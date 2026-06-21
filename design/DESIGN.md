@@ -214,6 +214,13 @@ Bubble Tea (Elm: `Model`/`Update`/`View`). A root `app.Model` routes between
 view states. We follow Bubble Tea idioms but deviate freely where it helps
 (e.g. background producers pushing via a channel — §6.3).
 
+> **Stack note (step 04):** the Charm libraries are the **v2** line
+> (`charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`,
+> `charm.land/glamour/v2`). The Elm architecture is unchanged, but v2 shifts a few
+> idioms used by the snippets below: `View()` returns a `tea.View` (alt-screen is
+> a field on it, not a program option) and key presses arrive as `tea.KeyPressMsg`.
+> See `design/implementation/04-tui-core.md` for the full deviation list.
+
 ### 6.1 Root model
 
 ```go

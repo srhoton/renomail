@@ -255,9 +255,41 @@ func runTUI(cfg config.Config, paths config.Paths) error {
 
 ## Done checklist
 
-- [ ] Render pipeline converts HTML→markdown→styled text, width-aware, text
+- [x] Render pipeline converts HTML→markdown→styled text, width-aware, text
       fallback, strips scripts.
-- [ ] Feed list renders rows with read/unread styling; reader scrolls rendered
+- [x] Feed list renders rows with read/unread styling; reader scrolls rendered
       bodies; routing (open/back) works.
-- [ ] TUI launches by default and displays cached items.
-- [ ] Render goldens + `Update()`/teatest tests pass; `gofmt`/`vet`/`test` green.
+- [x] TUI launches by default and displays cached items.
+- [x] Render goldens + `Update()`/teatest tests pass; `gofmt`/`vet`/`test` green.
+
+## Implementation notes (deviations from the snippets above)
+
+These keep the blueprint honest; none change the Bubble Tea architecture or the
+`Provider`/store contracts.
+
+- **Charm v2 stack on `charm.land` paths.** The snippets above are v1
+  (`View() string`, `tea.KeyMsg`, `tea.WithAltScreen`, `github.com/charmbracelet/…`).
+  Step 04 adopts the released v2 line, whose module paths are vanity imports under
+  `charm.land` (not `github.com/charmbracelet`): `charm.land/bubbletea/v2`,
+  `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`, `charm.land/glamour/v2`.
+  The v2 API deltas actually used:
+  - root `Model.View()` returns `tea.View`; alt-screen is `v.AltScreen = true` on
+    the returned view, so `tea.NewProgram(m)` takes no `WithAltScreen` option;
+  - key presses arrive as `tea.KeyPressMsg` (matched with `bubbles/v2/key.Matches`);
+  - `glamour/v2` dropped `WithAutoStyle` — `render` picks dark/light explicitly via
+    `lipgloss.HasDarkBackground` and `WithStandardStyle`.
+- **`loadBodyCmd` hydrates the body from the store before rendering.** `store.Query`
+  returns body-less list items, so the command calls `store.GetBody(id)` to load
+  `BodyHTML`/`BodyText` before `render.Render` — this is the lazy body-load the
+  design intends and the seam the Gmail provider (step 06) reuses.
+- **Relative age via `dustin/go-humanize`** (`humanize.Time`) rather than a custom
+  `humanAge`.
+- **No-arg `dispatch` launches the TUI**; the step-03 config summary (`summarize`)
+  is removed. `runTUI` is split into a testable `buildTUI` (data dir + store +
+  model) and the program launch, and accepts `tea.ProgramOption`s so the launch
+  path is covered headlessly.
+- **Tests:** `internal/ui/app_test.go` covers `Update()` routing and the
+  store-backed commands plus a `teatest/v2` snapshot; the feed/reader/keys/styles
+  sub-packages have focused unit tests. Deferred to later steps (per the scope
+  note): filter/search (`viewFilter`), `m`/`M` read toggles, `o` open-in-browser,
+  and the background sync engine.
