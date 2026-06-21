@@ -1,0 +1,77 @@
+Session prompts that produced this commit
+==========================================
+
+[1] ok, that PR is now merged. Can you plan out completing step 8?
+    (plan mode) -- produced a plan for Step 08 (design/implementation/
+    08-polish-and-docs.md). Research-first pass (3 Explore agents) mapped the
+    current state: most UI machinery (status bar, ?-toggle help, resize sizing,
+    renderer width, ShortHelp/FullHelp) already landed in Steps 04-07, and
+    coverage was already >=80% on every target package. So Step 08 was scoped to
+    the genuine gaps: open-in-browser (o), consent-URL auto-open, force-sync (R),
+    resize body re-render, transient-error auto-clear, background-aware theming,
+    and the docs. Verified seams by reading keys.go, app.go, engine.go, auth.go,
+    config.go, styles.go. Confirmed github.com/pkg/browser was not yet a dep and
+    lipgloss v2 dropped AdaptiveColor (use lipgloss.LightDark).
+
+[2] AskUserQuestion answers:
+    - Force-sync (R): "Include R force-sync" -- DESIGN.md 6.7 lists it though the
+      step doc did not; added an engine Trigger() API.
+    - CI workflow: "Skip CI" -- no .github/workflows/ci.yml; Makefile covers local
+      checks.
+
+[3] (ExitPlanMode) plan approved.
+
+[4] /review -- four-reviewer pass (functional, code-quality, ADR, performance) on
+    the Step 08 changes. Functional APPROVED, quality PASS, performance PASS, ADR
+    N/A. Zero CRITICAL/HIGH; three LOW informational items (one a verified-correct
+    non-issue).
+
+[5] yes, do the quick polish -- applied two LOW quality nits: a doc note on
+    current() that openItem is an open-time snapshot whose mutable fields (Read)
+    may lag the feed (only the immutable URL is read today); and de-duplicated the
+    UI test helper (newSeededModel now reuses newSeededStore).
+
+[6] /trueup -- commit the work, add the session prompts via git notes, push, and
+    open a PR via the GitHub CLI whose description reflects a full diff against the
+    base branch.
+
+Work performed
+--------------
+- internal/syncengine/engine.go: + buffered(1) coalescing trigger chan + Trigger()
+  (non-blocking select/default); Run selects on it alongside ctx.Done + ticker.
+- internal/syncengine/engine_test.go: Trigger drives an extra sweep; Trigger is
+  non-blocking when its buffer is full.
+- internal/ui/keys/keys.go: + OpenBrowser ("o") + ForceSync ("R") bindings; added
+  to Default() and FullHelp(). keys_test.go: bindings set + present in FullHelp.
+- internal/ui/app.go: openItem + openURL (default browser.OpenURL) + triggerSync
+  fields; New(st, events, providers, triggerSync, warns); current() helper (with a
+  snapshot-staleness note); o/R handlers in handleKey's common section; status
+  cleared on keypress; WindowSizeMsg re-renders the open item at the new width.
+- internal/ui/app_test.go: o feed/reader/no-op/error, R trigger+relight+no-op-
+  while-syncing, resize re-render, status-clear; New() call-site updates; helper
+  de-dup.
+- internal/ui/styles/styles.go: stylesForBackground(dark) via lipgloss.LightDark;
+  DefaultStyles detects the terminal background. styles_test.go: both palettes.
+- internal/source/gmail/auth.go: best-effort browser.OpenURL(authURL) after the
+  print; updated the stale comment.
+- cmd/renomail/tui.go: ui.New(..., eng.Trigger, ...).
+- README.md: full rewrite. docs/SETUP.md + docs/CONFIG.md: new. go.mod/go.sum:
+  github.com/pkg/browser promoted to direct.
+- design/implementation/08-polish-and-docs.md: checklist ticked + deviation notes.
+
+Decisions
+---------
+- Step 08 branched from origin/main (64523da, PR #8) so the PR diff shows only
+  Step 08.
+- Force-sync uses a coalescing buffered(1) trigger; the UI guards forceSync on
+  !m.syncing so the inflight counter is never double-counted, and the manual sweep
+  re-lights the spinner (the automatic periodic case still lacks a sweep-start
+  signal, left as the Step 07 note).
+- Resize re-render reads the store cache with a nil provider (never the network);
+  list items are body-less, so the body is genuinely not resident and must be
+  re-fetched to re-wrap -- reviewers verified this is correct, not wasteful.
+- Theming: lipgloss v2 has no AdaptiveColor; used lipgloss.LightDark over the
+  detected background instead.
+- Transient errors clear on the next keypress (the design's "or on next key"
+  option), chosen over a tick timer for determinism.
+- CI intentionally skipped per the [2] decision.
