@@ -77,8 +77,7 @@ These apply across all steps. They mirror `DESIGN.md` and the Go best-practice
 guide.
 
 - **Go version:** latest stable (≥1.22). Pin in `go.mod`.
-- **Module path:** `github.com/steverhoton/renomail` (adjust to the real remote
-  before first push).
+- **Module path:** `github.com/srhoton/renomail` (matches the GitHub remote).
 - **Layout:** thin `cmd/renomail`; all logic in `internal/...` (see DESIGN.md §2).
   Organize by domain/feature, not by layer.
 - **Errors:** return, don't panic, in normal flow. Wrap with context using
