@@ -20,8 +20,10 @@ type KeyMap struct {
 	Top    key.Binding
 	Bottom key.Binding
 	Open   key.Binding
-	Back   key.Binding
-	Quit   key.Binding
+	// TogglePane shows/hides the bottom reading (preview) pane on the feed view.
+	TogglePane key.Binding
+	Back       key.Binding
+	Quit       key.Binding
 	// ForceQuit (ctrl+c only) quits even from contexts where the plain Quit key
 	// ("q") must be typeable, such as the search bar.
 	ForceQuit key.Binding
@@ -48,15 +50,16 @@ type KeyMap struct {
 // plus the search, quick-filter, and read-state keys.
 func Default() KeyMap {
 	return KeyMap{
-		Up:        key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "up")),
-		Down:      key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "down")),
-		Top:       key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
-		Bottom:    key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
-		Open:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
-		Back:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-		ForceQuit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
-		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Up:         key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "up")),
+		Down:       key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "down")),
+		Top:        key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
+		Bottom:     key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
+		Open:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+		TogglePane: key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "preview")),
+		Back:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		ForceQuit:  key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 
 		Search:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 		FilterEmail: key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "email")),
@@ -75,7 +78,7 @@ func Default() KeyMap {
 
 // ShortHelp returns the compact help shown at the bottom of the feed view.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Open, k.Search, k.ToggleRead, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Open, k.TogglePane, k.Search, k.ToggleRead, k.Help, k.Quit}
 }
 
 // FullHelp returns the expanded help, grouped into columns, shown when help is
@@ -83,7 +86,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Top, k.Bottom},
-		{k.Open, k.Back, k.OpenBrowser},
+		{k.Open, k.TogglePane, k.Back, k.OpenBrowser},
 		{k.Search, k.FilterEmail, k.FilterRSS, k.CycleRead, k.FilterAll},
 		{k.ToggleRead, k.MarkAllRead, k.MarkSourceRead, k.ForceSync},
 		{k.Help, k.Quit},

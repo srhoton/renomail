@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/styles"
@@ -19,9 +20,14 @@ import (
 
 // Renderer turns an item body into terminal-ready styled text. It is width-aware
 // (the reader rebuilds it on a terminal resize via SetWidth) and picks a light or
-// dark Glamour theme from the detected terminal background. A Renderer is not safe
-// for concurrent use; the UI drives it from render commands one at a time.
+// dark Glamour theme from the detected terminal background.
+//
+// A Renderer is safe for concurrent use: mu serializes SetWidth and Render, which both
+// touch the underlying Glamour renderer (SetWidth replaces it, Render calls it). The UI
+// also coalesces preview renders to one at a time, but the lock is the hard guarantee —
+// e.g. a resize (SetWidth) can land while a body render is still in flight.
 type Renderer struct {
+	mu    sync.Mutex
 	width int
 	style string
 	md    *glamour.TermRenderer
@@ -69,8 +75,11 @@ func (r *Renderer) rebuild() error {
 }
 
 // SetWidth rebuilds the underlying Glamour renderer to wrap at w columns. It is a
-// no-op when the width is unchanged or non-positive, so resize spam is cheap.
+// no-op when the width is unchanged or non-positive, so resize spam is cheap. It locks
+// mu so the rebuild cannot race a concurrent Render.
 func (r *Renderer) SetWidth(w int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if w <= 0 || w == r.width {
 		return nil
 	}
@@ -81,8 +90,11 @@ func (r *Renderer) SetWidth(w int) error {
 // Render converts an item's body to terminal-ready styled text. When BodyHTML is
 // present it is converted to markdown (which sanitizes away scripts/styles) and
 // then styled; otherwise the plain BodyText is styled directly. Glamour wraps
-// both to the configured width.
+// both to the configured width. It locks mu so the Glamour renderer is never used
+// concurrently with another Render or a SetWidth rebuild.
 func (r *Renderer) Render(it model.Item) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if strings.TrimSpace(it.BodyHTML) == "" {
 		out, err := r.md.Render(it.BodyText)
 		if err != nil {

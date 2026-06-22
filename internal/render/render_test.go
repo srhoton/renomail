@@ -3,6 +3,7 @@ package render
 import (
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/srhoton/renomail/internal/model"
@@ -114,4 +115,35 @@ func TestSetWidth_rebuildsAndIsIdempotent(t *testing.T) {
 	if _, err := r.Render(model.Item{BodyText: "after resize"}); err != nil {
 		t.Errorf("Render after SetWidth error = %v", err)
 	}
+}
+
+// TestRenderer_concurrentRenderAndSetWidth exercises the renderer from many
+// goroutines at once — concurrent Render calls plus a SetWidth racing them. It must
+// not data-race (run under -race) and every Render must return content. This guards
+// the contract that the UI's preview pane relies on, where a resize can land while a
+// body render is still in flight.
+func TestRenderer_concurrentRenderAndSetWidth(t *testing.T) {
+	r, err := New(80)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	it := model.Item{BodyText: "# Title\n\nSome body text to render across widths."}
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func(i int) {
+			defer wg.Done()
+			if i%4 == 0 {
+				// Interleave width changes with the renders.
+				_ = r.SetWidth(40 + i)
+				return
+			}
+			if out, err := r.Render(it); err != nil || out == "" {
+				t.Errorf("concurrent Render: out=%q err=%v", out, err)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
