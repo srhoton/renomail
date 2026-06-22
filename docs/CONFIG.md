@@ -83,6 +83,30 @@ url   = "https://example.com/blog/feed.xml"
 title = "Example Blog"
 ```
 
+## Slack notifications — `[slack]`
+
+An optional Slack [incoming webhook](https://api.slack.com/messaging/webhooks) digest.
+When configured, renomail posts **one** message per sync sweep that finds new items,
+grouped by source with linked titles (and the sender for emails) and capped with a
+"…and N more" line. The initial sweep on launch is never posted. Independent of tmux —
+both channels may be on at once.
+
+| Key           | Type   | Required | Description                                                                 |
+| ------------- | ------ | -------- | --------------------------------------------------------------------------- |
+| `webhook_url` | string | no\*     | Slack incoming-webhook URL (must be `https://`). May be supplied via env instead. |
+| `max_items`   | int    | no       | Item lines per digest before the remainder collapses to "…and N more". Default `10`. |
+
+\* The webhook may instead be provided by the `RENOMAIL_SLACK_WEBHOOK` environment
+variable, which **takes precedence** over `webhook_url` — handy for keeping the secret
+out of the config file. Slack is disabled when neither the env var nor `webhook_url`
+is set. A non-`https` `webhook_url` is rejected at startup.
+
+```toml
+[slack]
+webhook_url = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX"
+max_items   = 10
+```
+
 ## Complete example
 
 ```toml
@@ -102,6 +126,9 @@ path = "~/feeds.opml"
 [[feed]]
 url   = "https://example.com/blog/feed.xml"
 title = "Example Blog"
+
+[slack]
+webhook_url = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX"
 ```
 
 ## File locations

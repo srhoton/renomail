@@ -126,34 +126,34 @@ const listColumns = `id, kind, source_id, source_name, author, title, snippet,
 	url, native_id, published, fetched, read`
 
 // UpsertItems inserts or updates items in a single transaction and returns the
-// number of rows genuinely inserted (i.e. items whose id was not already
-// present). On conflict the content columns are refreshed, but the read flag is
-// deliberately left untouched so local read/unread state survives re-fetching. A
-// re-fetch that carries an empty body does not clobber a previously stored body.
-//
-// The inserted count drives the "N new items" notification. It is computed by
-// countNew before the write transaction begins, deliberately in autocommit: were
-// the count's SELECT run inside the upsert transaction it would hold a shared lock
-// that the first INSERT must upgrade to a write lock, and under the engine's
-// concurrent per-provider sweeps two such upgrades deadlock (SQLITE_BUSY, which
-// busy_timeout does not retry). Running it in autocommit releases the read lock
-// immediately, so the upsert transaction acquires the write lock cleanly. The
-// count stays exact across that gap because item ids are provider-namespaced and a
-// provider syncs serially, so no other writer touches these ids in between. On any
-// error the count is 0.
-func (s *Store) UpsertItems(ctx context.Context, items []model.Item) (int, error) {
+// items that were genuinely new (i.e. those whose id was not already present), each
+// new id appearing once and in input order. On conflict the content columns are
+// refreshed, but the read flag is deliberately left untouched so local read/unread
+// state survives re-fetching, and a re-fetch that carries an empty body does not
+// clobber a previously stored body. The returned new items drive the "N new items"
+// notification (len gives the count; the items themselves feed the Slack digest).
+// On any error the result is nil.
+func (s *Store) UpsertItems(ctx context.Context, items []model.Item) ([]model.Item, error) {
 	if len(items) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 
-	inserted, err := s.countNew(ctx, items)
+	// Compute the new-id set before the write transaction begins, deliberately in
+	// autocommit: were that SELECT run inside the upsert transaction it would hold a
+	// shared lock that the first INSERT must upgrade to a write lock, and under the
+	// engine's concurrent per-provider sweeps two such upgrades deadlock (SQLITE_BUSY,
+	// which busy_timeout does not retry). Running it in autocommit releases the read
+	// lock immediately, so the upsert transaction acquires the write lock cleanly. The
+	// set stays exact across that gap because item ids are provider-namespaced and a
+	// provider syncs serially, so no other writer touches these ids in between.
+	newIDs, err := s.newIDs(ctx, items)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin: %w", err)
+		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -177,7 +177,7 @@ ON CONFLICT(id) DO UPDATE SET
 
 	stmt, err := tx.PrepareContext(ctx, q)
 	if err != nil {
-		return 0, fmt.Errorf("prepare upsert: %w", err)
+		return nil, fmt.Errorf("prepare upsert: %w", err)
 	}
 	defer func() { _ = stmt.Close() }()
 
@@ -187,34 +187,44 @@ ON CONFLICT(id) DO UPDATE SET
 			it.Title, it.Snippet, it.URL, it.NativeID,
 			it.Published.Unix(), it.Fetched.Unix(),
 			boolToInt(it.Read), it.BodyHTML, it.BodyText); err != nil {
-			return 0, fmt.Errorf("upsert %s: %w", it.ID, err)
+			return nil, fmt.Errorf("upsert %s: %w", it.ID, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit upsert: %w", err)
+		return nil, fmt.Errorf("commit upsert: %w", err)
 	}
-	return inserted, nil
-}
 
-// countNew reports how many of items' ids are new (not already stored), counting
-// each distinct id once even when it repeats within items — an upsert of a batch
-// that carries the same id twice (e.g. two RSS entries that collapse to the same
-// StableID) inserts a single row, so it must count once. The id lookup is chunked
-// to stay under SQLite's bind-variable limit regardless of sweep size, and the
-// leading id PRIMARY KEY makes each chunk an index probe.
-func (s *Store) countNew(ctx context.Context, items []model.Item) (int, error) {
-	unique := make([]string, 0, len(items))
-	seen := make(map[string]struct{}, len(items))
+	// Project items down to the genuinely-new ones, preserving input order and
+	// emitting each new id once (a batch may repeat an id that collapsed to one row).
+	newItems := make([]model.Item, 0, len(newIDs))
 	for _, it := range items {
-		if _, ok := seen[it.ID]; ok {
+		if _, ok := newIDs[it.ID]; !ok {
 			continue
 		}
-		seen[it.ID] = struct{}{}
+		delete(newIDs, it.ID) // emit once
+		newItems = append(newItems, it)
+	}
+	return newItems, nil
+}
+
+// newIDs returns the set of items' ids that are new (not already stored). Each
+// distinct id is considered once even when it repeats within items — an upsert of a
+// batch that carries the same id twice (e.g. two RSS entries that collapse to the
+// same StableID) inserts a single row. The id lookup is chunked to stay under
+// SQLite's bind-variable limit regardless of sweep size, and the leading id PRIMARY
+// KEY makes each chunk an index probe.
+func (s *Store) newIDs(ctx context.Context, items []model.Item) (map[string]struct{}, error) {
+	unique := make([]string, 0, len(items))
+	candidates := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		if _, ok := candidates[it.ID]; ok {
+			continue
+		}
+		candidates[it.ID] = struct{}{}
 		unique = append(unique, it.ID)
 	}
 
 	const chunk = 500
-	existing := 0
 	for start := 0; start < len(unique); start += chunk {
 		end := min(start+chunk, len(unique))
 		batch := unique[start:end]
@@ -225,15 +235,27 @@ func (s *Store) countNew(ctx context.Context, items []model.Item) (int, error) {
 			ph[i] = "?"
 			args[i] = id
 		}
-		q := "SELECT COUNT(*) FROM items WHERE id IN (" + strings.Join(ph, ",") + ")"
+		q := "SELECT id FROM items WHERE id IN (" + strings.Join(ph, ",") + ")"
 
-		var n int
-		if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
-			return 0, fmt.Errorf("count existing items: %w", err)
+		rows, err := s.db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("query existing items: %w", err)
 		}
-		existing += n
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan existing item id: %w", err)
+			}
+			delete(candidates, id) // already stored: not new
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("iterate existing items: %w", err)
+		}
+		_ = rows.Close()
 	}
-	return len(unique) - existing, nil
+	return candidates, nil
 }
 
 // Query returns the items matching f, newest first by published time, with id

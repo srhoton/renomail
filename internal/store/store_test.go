@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -51,14 +52,6 @@ func newItem(id, srcID string, kind model.Kind, published int64) model.Item {
 	}
 }
 
-func ids(items []model.Item) []string {
-	out := make([]string, len(items))
-	for i, it := range items {
-		out[i] = it.ID
-	}
-	return out
-}
-
 func TestQuery_ordersByPublishedDescending(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -77,7 +70,7 @@ func TestQuery_ordersByPublishedDescending(t *testing.T) {
 		t.Fatalf("Query: %v", err)
 	}
 	want := []string{"c", "b", "a"}
-	if g := ids(got); !equalStrings(g, want) {
+	if g := itemIDs(got); !slices.Equal(g, want) {
 		t.Errorf("order = %v, want %v", g, want)
 	}
 }
@@ -275,7 +268,7 @@ func TestQuery_filterDimensions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Query: %v", err)
 			}
-			if g := ids(got); !equalStrings(g, tt.want) {
+			if g := itemIDs(got); !slices.Equal(g, tt.want) {
 				t.Errorf("ids = %v, want %v", g, tt.want)
 			}
 		})
@@ -306,7 +299,7 @@ func TestSetRead_togglesBothDirections(t *testing.T) {
 	if len(read) != 0 {
 		t.Errorf("after SetRead(false): read count = %d, want 0", len(read))
 	}
-	if g := ids(unread); !equalStrings(g, []string{"a"}) {
+	if g := itemIDs(unread); !slices.Equal(g, []string{"a"}) {
 		t.Errorf("after SetRead(false): unread = %v, want [a]", g)
 	}
 }
@@ -328,7 +321,7 @@ func TestQuery_searchEscapesWildcards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if g := ids(got); !equalStrings(g, []string{"lit"}) {
+	if g := itemIDs(got); !slices.Equal(g, []string{"lit"}) {
 		t.Errorf("search %q = %v, want [lit]", "50%", g)
 	}
 
@@ -337,7 +330,7 @@ func TestQuery_searchEscapesWildcards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if g := ids(got); !equalStrings(g, []string{"lit"}) {
+	if g := itemIDs(got); !slices.Equal(g, []string{"lit"}) {
 		t.Errorf("search %q matched %v, want only the literal-percent row [lit]", "%", g)
 	}
 }
@@ -364,7 +357,7 @@ func TestMarkAllRead_onlyAffectsMatchingSubset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if g := ids(stillUnread); !equalStrings(g, []string{"mail1"}) {
+	if g := itemIDs(stillUnread); !slices.Equal(g, []string{"mail1"}) {
 		t.Errorf("unread after MarkAllRead(rss) = %v, want [mail1]", g)
 	}
 }
@@ -391,7 +384,7 @@ func TestMarkAllRead_scopedBySourceID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query(read): %v", err)
 	}
-	if g := ids(read); !equalStrings(g, []string{"a2", "a1"}) {
+	if g := itemIDs(read); !slices.Equal(g, []string{"a2", "a1"}) {
 		t.Errorf("read after MarkAllRead(feedA) = %v, want feedA's items [a2 a1]", g)
 	}
 
@@ -399,7 +392,7 @@ func TestMarkAllRead_scopedBySourceID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query(unread): %v", err)
 	}
-	if g := ids(unread); !equalStrings(g, []string{"b1"}) {
+	if g := itemIDs(unread); !slices.Equal(g, []string{"b1"}) {
 		t.Errorf("unread after MarkAllRead(feedA) = %v, want [b1]", g)
 	}
 }
@@ -529,124 +522,147 @@ func TestUpsertSources_batchAndEmptyNoop(t *testing.T) {
 	}
 }
 
+// itemIDs extracts the ids from a slice of items, preserving order.
+func itemIDs(items []model.Item) []string {
+	ids := make([]string, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	return ids
+}
+
 func TestUpsertItems_emptySliceNoop(t *testing.T) {
 	s := newTestStore(t)
-	n, err := s.UpsertItems(context.Background(), nil)
+	got, err := s.UpsertItems(context.Background(), nil)
 	if err != nil {
 		t.Errorf("UpsertItems(nil) = %v, want nil", err)
 	}
-	if n != 0 {
-		t.Errorf("UpsertItems(nil) inserted = %d, want 0", n)
+	if len(got) != 0 {
+		t.Errorf("UpsertItems(nil) new items = %d, want 0", len(got))
 	}
 }
 
-func TestUpsertItems_reportsInsertedCount(t *testing.T) {
+func TestUpsertItems_returnsNewItems(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	// First batch: every id is new, so all are counted as inserted.
+	// First batch: every id is new, so all are returned, in input order.
 	first := []model.Item{
 		newItem("a", "s1", model.KindRSS, 100),
 		newItem("b", "s1", model.KindRSS, 200),
 		newItem("c", "s1", model.KindRSS, 300),
 	}
-	if n, err := s.UpsertItems(ctx, first); err != nil {
+	got, err := s.UpsertItems(ctx, first)
+	if err != nil {
 		t.Fatalf("UpsertItems(first): %v", err)
-	} else if n != 3 {
-		t.Errorf("first inserted = %d, want 3", n)
+	}
+	if diff := itemIDs(got); !slices.Equal(diff, []string{"a", "b", "c"}) {
+		t.Errorf("first new ids = %v, want [a b c]", diff)
 	}
 
-	// Re-upsert the same ids: none are new, so the count is 0 even though the
+	// Re-upsert the same ids: none are new, so the result is empty even though the
 	// rows are updated in place.
 	for i := range first {
 		first[i].Title = "refreshed " + first[i].ID
 	}
-	if n, err := s.UpsertItems(ctx, first); err != nil {
+	got, err = s.UpsertItems(ctx, first)
+	if err != nil {
 		t.Fatalf("UpsertItems(re-seen): %v", err)
-	} else if n != 0 {
-		t.Errorf("re-seen inserted = %d, want 0", n)
+	}
+	if len(got) != 0 {
+		t.Errorf("re-seen new items = %v, want none", itemIDs(got))
 	}
 
-	// Mixed batch: two known ids plus one new id counts exactly one insert.
+	// Mixed batch: two known ids plus one new id returns exactly the new one.
 	mixed := []model.Item{
 		newItem("a", "s1", model.KindRSS, 100), // existing
 		newItem("c", "s1", model.KindRSS, 300), // existing
 		newItem("d", "s1", model.KindRSS, 400), // new
 	}
-	if n, err := s.UpsertItems(ctx, mixed); err != nil {
+	got, err = s.UpsertItems(ctx, mixed)
+	if err != nil {
 		t.Fatalf("UpsertItems(mixed): %v", err)
-	} else if n != 1 {
-		t.Errorf("mixed inserted = %d, want 1", n)
+	}
+	if ids := itemIDs(got); !slices.Equal(ids, []string{"d"}) {
+		t.Errorf("mixed new ids = %v, want [d]", ids)
 	}
 
 	// The content refresh from the re-seen batch must still have landed.
-	got, err := s.Query(ctx, model.Filter{})
+	all, err := s.Query(ctx, model.Filter{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("row count = %d, want 4", len(got))
+	if len(all) != 4 {
+		t.Fatalf("row count = %d, want 4", len(all))
 	}
 }
 
-func TestUpsertItems_countDedupesRepeatedIDsInBatch(t *testing.T) {
+func TestUpsertItems_dedupesRepeatedIDsInBatch(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
 	// A batch carrying the same id twice (e.g. two RSS entries that collapse to the
-	// same StableID) inserts a single row, so the inserted count must be 1, not 2.
+	// same StableID) inserts a single row, so it is returned once, not twice.
 	dup := newItem("a", "s1", model.KindRSS, 100)
 	batch := []model.Item{dup, newItem("a", "s1", model.KindRSS, 100)}
-	if n, err := s.UpsertItems(ctx, batch); err != nil {
+	got, err := s.UpsertItems(ctx, batch)
+	if err != nil {
 		t.Fatalf("UpsertItems(dup): %v", err)
-	} else if n != 1 {
-		t.Errorf("inserted = %d, want 1 (the repeated id counts once)", n)
+	}
+	if ids := itemIDs(got); !slices.Equal(ids, []string{"a"}) {
+		t.Errorf("new ids = %v, want [a] (the repeated id appears once)", ids)
 	}
 
 	// Exactly one row landed.
-	got, err := s.Query(ctx, model.Filter{})
+	all, err := s.Query(ctx, model.Filter{})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(got) != 1 {
-		t.Errorf("row count = %d, want 1", len(got))
+	if len(all) != 1 {
+		t.Errorf("row count = %d, want 1", len(all))
 	}
 
-	// A mixed batch: one new id repeated, plus the now-existing id — one genuine insert.
+	// A mixed batch: one new id repeated, plus the now-existing id — one genuine new item.
 	mixed := []model.Item{
 		newItem("b", "s1", model.KindRSS, 200),
 		newItem("b", "s1", model.KindRSS, 200), // duplicate of the new id
 		newItem("a", "s1", model.KindRSS, 100), // already stored
 	}
-	if n, err := s.UpsertItems(ctx, mixed); err != nil {
+	got, err = s.UpsertItems(ctx, mixed)
+	if err != nil {
 		t.Fatalf("UpsertItems(mixed dup): %v", err)
-	} else if n != 1 {
-		t.Errorf("mixed inserted = %d, want 1", n)
+	}
+	if ids := itemIDs(got); !slices.Equal(ids, []string{"b"}) {
+		t.Errorf("mixed new ids = %v, want [b]", ids)
 	}
 }
 
-func TestUpsertItems_countSpansChunkBoundary(t *testing.T) {
+func TestUpsertItems_spansChunkBoundary(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	// More than one existence-check chunk (500) of brand-new ids: the per-chunk
-	// counts must sum to the full insert total.
+	// More than one existence-check chunk (500) of brand-new ids: every chunk's new
+	// ids must be returned, summing to the full total.
 	const total = 1200
 	batch := make([]model.Item, total)
 	for i := range batch {
 		batch[i] = newItem("item-"+strconv.Itoa(i), "s1", model.KindRSS, int64(i))
 	}
-	if n, err := s.UpsertItems(ctx, batch); err != nil {
+	got, err := s.UpsertItems(ctx, batch)
+	if err != nil {
 		t.Fatalf("UpsertItems(large): %v", err)
-	} else if n != total {
-		t.Errorf("inserted = %d, want %d", n, total)
+	}
+	if len(got) != total {
+		t.Errorf("new items = %d, want %d", len(got), total)
 	}
 
 	// Re-upsert the same large batch: zero new across every chunk.
-	if n, err := s.UpsertItems(ctx, batch); err != nil {
+	got, err = s.UpsertItems(ctx, batch)
+	if err != nil {
 		t.Fatalf("UpsertItems(large re-seen): %v", err)
-	} else if n != 0 {
-		t.Errorf("re-seen large inserted = %d, want 0", n)
+	}
+	if len(got) != 0 {
+		t.Errorf("re-seen large new items = %d, want 0", len(got))
 	}
 }
 
@@ -669,16 +685,4 @@ func TestOpen_rejectsNewerSchema(t *testing.T) {
 	if _, err := Open(path); err == nil {
 		t.Errorf("Open of newer-schema db = nil error, want refusal")
 	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

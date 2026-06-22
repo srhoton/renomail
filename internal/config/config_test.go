@@ -83,6 +83,70 @@ func TestLoad_invalidDuration_returnsError(t *testing.T) {
 	}
 }
 
+func TestLoad_slackBlock_parses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	const body = `
+[slack]
+webhook_url = "https://hooks.slack.com/services/T/B/X"
+max_items = 25
+`
+	if err := writeFile(t, path, body); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Slack == nil {
+		t.Fatal("Slack = nil, want the parsed [slack] table")
+	}
+	if got.Slack.WebhookURL != "https://hooks.slack.com/services/T/B/X" {
+		t.Errorf("WebhookURL = %q", got.Slack.WebhookURL)
+	}
+	if got.SlackMaxItems() != 25 {
+		t.Errorf("SlackMaxItems() = %d, want 25", got.SlackMaxItems())
+	}
+}
+
+func TestSlackMaxItems_defaults(t *testing.T) {
+	// Absent [slack] table.
+	if got := (Config{}).SlackMaxItems(); got != defaultSlackMaxItems {
+		t.Errorf("SlackMaxItems() with no slack = %d, want %d", got, defaultSlackMaxItems)
+	}
+	// Present but unset/non-positive max_items.
+	if got := (Config{Slack: &SlackConfig{WebhookURL: "https://x"}}).SlackMaxItems(); got != defaultSlackMaxItems {
+		t.Errorf("SlackMaxItems() with unset max = %d, want %d", got, defaultSlackMaxItems)
+	}
+}
+
+func TestLoad_slackWebhookNotHTTPS_returnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := writeFile(t, path, "[slack]\nwebhook_url = \"http://insecure.example/hook\"\n"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() error = nil, want rejection of a non-https webhook")
+	}
+}
+
+func TestLoad_slackEmptyWebhook_allowed(t *testing.T) {
+	// An empty webhook is valid: it may be supplied via RENOMAIL_SLACK_WEBHOOK.
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := writeFile(t, path, "[slack]\nmax_items = 5\n"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil for an empty webhook", err)
+	}
+	if got.Slack == nil || got.Slack.MaxItems != 5 {
+		t.Errorf("Slack = %+v, want the parsed table with max_items=5", got.Slack)
+	}
+}
+
 func TestSave_unwritableParent_returnsError(t *testing.T) {
 	// Place a regular file where Save expects a directory, so MkdirAll fails.
 	blocker := filepath.Join(t.TempDir(), "blocker")
