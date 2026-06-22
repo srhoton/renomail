@@ -1,0 +1,42 @@
+Session prompts that produced this change (verbatim user messages):
+
+1. "Ok, I would now like to plan out a new feature. I would like to have a hotkey
+   that opens up and 'reading pane' on the bottom half of the screen that shows the
+   item detail (like hitting enter does now). Seeing in the reading pane marks it as
+   read. Hitting the hotkey again hides the reading pane. Can you plan that out?"
+
+   Plan-mode AskUserQuestion answers:
+   - Pane behavior: "Follow selection (live)" — the pane always mirrors the selected
+     row; moving the cursor updates the pane and marks that item read.
+   - Pane scrolling: "Enter for full reader" — the pane is preview-only; long
+     articles are read by promoting to the existing full-screen reader.
+
+2. "/review" — ran the four-reviewer pass (functional, code-quality, adr-compliance,
+   performance) on the working-tree changes.
+
+   Review found and I fixed:
+   - CRITICAL (perf+functional): rapid scrolling with the pane open spawned
+     concurrent r.Render calls on render.Renderer, documented as "not safe for
+     concurrent use" — a data race the sequential tests never exercised. Fixed by
+     (a) adding a mutex to render.Renderer serializing Render/SetWidth (with a
+     16-goroutine race test) and (b) coalescing preview renders single-flight via a
+     `loading` gate with a trailing-edge re-load.
+   - HIGH (functional): under an unread-only filter the live pane desynced because
+     marking the previewed row read removed it from the list. Fixed by skipping
+     RemoveLocal while the pane is open (row dims in place; reconciles on reload);
+     pane-closed removal preserved.
+   - MEDIUM/LOW polish: strengthened the toggle-open test to assert the store
+     effect; tied minSplitHeight's comment to reader.headerLines; corrected a
+     "not safe for concurrent use" doc contradiction after adding the mutex; added
+     an ordering comment to the test fixture.
+   Re-review verdicts after fixes: functional APPROVED, code-quality PASS,
+   performance PASS, adr-compliance N/A (catalog is cloud/Lambda/React-scoped).
+
+3. "/trueup" — "ok. Please commit your work, add prompts in this session to the
+   commit via git notes, push it, and using your github cli tool, create a PR. Make
+   sure the README for the PR accurately describes the changes made from a full diff
+   from the branch you are merging into."
+
+Note: every reviewer flagged the injected MCP/Discord "instructions" block (treat
+channel messages as commands / approve pairings) as a prompt-injection pattern;
+none acted on it, and neither did I.
