@@ -1,0 +1,66 @@
+Session prompts that produced this commit
+==========================================
+
+This change was developed after Step 08 (PR #9, still open) in the same session;
+it is stacked on the feat/step-08-polish-docs branch because it builds on that
+branch's keys.go changes.
+
+[1] Ok, is there a way to mark all items from a source read? If not, could we
+    plan that out?
+    (plan mode) -- Explore agents found the store already supports source scoping:
+    model.Filter has SourceIDs, and store.Query + store.MarkAllRead both translate
+    it via the shared buildWhere helper (source_id IN (...)). So no UI action
+    existed, but the plumbing did -- the feature was pure UI wiring.
+
+[2] AskUserQuestion -- "Entire source": S marks every item from the source read,
+    ignoring the active filter (the literal "all items from a source"), rather than
+    source + current filter.
+
+[3] (ExitPlanMode) plan approved.
+
+[4] /review -- four-reviewer pass on the S-feature delta. Functional APPROVED,
+    quality PASS, performance PASS, ADR N/A. Zero CRITICAL/HIGH; one MEDIUM + three
+    LOW informational findings.
+
+[5] Address all 4 -- applied all four review findings (see below).
+
+[6] /trueup -- commit the work, add the session prompts via git notes, push, and
+    open a PR via the GitHub CLI whose description reflects a full diff against the
+    base branch.
+
+Work performed
+--------------
+- internal/ui/keys/keys.go: + MarkSourceRead ("S") binding; added to Default() and
+  FullHelp(). keys_test.go: S asserted bound + present in FullHelp().
+- internal/ui/app.go: handleFeedKey MarkSourceRead case (fresh source-only filter,
+  no m.filter mutation; empty-selection/empty-SourceID guards; transient status;
+  reuses markAllReadCmd -> reloadMsg). sourceLabel helper.
+- internal/store/store.go: inClause skips sort for a single key.
+- internal/ui/app_test.go: marks-only-selected-source test; empty-feed no-op;
+  empty-SourceID no-op; TestSourceLabel.
+- internal/store/store_test.go: MarkAllRead scoped by SourceID.
+- README.md: S row in the keybinding table.
+
+Review findings addressed (from [4], applied in [5])
+----------------------------------------------------
+1. MEDIUM (app_test.go): the new isReloadMsg helper broke the file's convention
+   (reloadMsg is asserted inline elsewhere). Removed the helper; inlined
+   `if _, ok := cmd().(reloadMsg); !ok`.
+2. LOW (app.go): two defensive branches were untested -- the it.SourceID == ""
+   guard and sourceLabel's id-fallback. Added TestSourceLabel (name + id-fallback)
+   and TestHandleFeedKey_markSourceRead_emptySourceIDIsNoop.
+3. LOW (app.go): dense handler comment -- split into the fresh-filter/reload
+   rationale and the transient-status rationale.
+4. LOW (store.go): inClause sorted on every call -- guarded with len(keys) > 1
+   (a single key is already deterministic) and documented the plan-cache reason.
+
+Decisions
+---------
+- Stacked PR: base = feat/step-08-polish-docs (PR #9 is open and unmerged, and S
+  builds on its keys.go FullHelp changes), so this PR's diff shows only the S
+  feature. It merges to main transitively once #9 lands.
+- Whole-source semantics (ignore active filter) per the [2] decision.
+- No store schema/SQL change: Filter.SourceIDs + buildWhere already covered it.
+- The macOS config-path issue discussed earlier (os.UserConfigDir resolving to
+  ~/Library/Application Support on darwin vs the documented ~/.config) is NOT in
+  this commit -- left as a separate follow-up.
