@@ -1,0 +1,33 @@
+Session prompts that produced this change (verbatim user messages):
+
+1. "Ok, I have a new piece of functionality I would like you to think through.
+   I would like the app to detect if it is in a tmux window, and if it is, I
+   would like it to give me a tmux notification when new items arrive. Can you
+   plan that out?"
+
+   (Plan-mode AskUserQuestion answers:
+    - Mechanism: "display-message (status line)"
+    - Enablement: "Auto-on in tmux, config opt-out"
+    - Granularity: "Per source")
+
+2. "/review" — ran the four-reviewer pass (functional, code-quality,
+   adr-compliance, performance) on the working-tree changes.
+
+   Review found and I fixed:
+   - CRITICAL: SQLITE_BUSY — the inserted-count SELECT ran inside the upsert
+     transaction, causing a shared-to-write lock-upgrade deadlock under the
+     engine's concurrent per-provider sweeps (reproduced 5/5 without -race).
+     Fixed by moving the count to autocommit (countNew) before BeginTx.
+   - MEDIUM: insert count over-counted when a Fetch batch carried duplicate
+     ids; fixed by deduping incoming ids in countNew.
+   - MEDIUM: hardened notify.Tmux with a "--" end-of-options terminator.
+   - HIGH (comment): rewrote the misleading "race-free because SQLite
+     serializes writers" doc rationale to describe the autocommit design.
+   - LOW: renamed notifyCmd's `source` param (shadowed the source package).
+   Re-review verdicts after fixes: functional APPROVED, code-quality PASS,
+   adr-compliance PASS, performance PASS.
+
+3. "/trueup" — "ok. Please commit your work, add prompts in this session to the
+   commit via git notes, push it, and using your github cli tool, create a PR.
+   Make sure the README for the PR accurately describes the changes made from a
+   full diff from the branch you are merging into."
