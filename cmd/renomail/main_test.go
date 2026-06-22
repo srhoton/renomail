@@ -138,6 +138,62 @@ func TestBuildTUI_success(t *testing.T) {
 	}
 }
 
+func TestBuildTUI_withSlackConfig_succeeds(t *testing.T) {
+	dir := t.TempDir()
+	paths := config.Paths{
+		DataDir: filepath.Join(dir, "data"),
+		DBFile:  filepath.Join(dir, "data", "renomail.db"),
+	}
+	cfg := config.Config{Slack: &config.SlackConfig{WebhookURL: "https://hooks.slack.com/services/T/B/X"}}
+
+	_, st, eng, err := buildTUI(context.Background(), cfg, paths)
+	if err != nil {
+		t.Fatalf("buildTUI() with slack config error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if eng == nil {
+		t.Fatal("buildTUI() engine = nil, want a constructed sync engine")
+	}
+}
+
+func TestBuildTUI_nonHTTPSEnvWebhook_errors(t *testing.T) {
+	dir := t.TempDir()
+	paths := config.Paths{
+		DataDir: filepath.Join(dir, "data"),
+		DBFile:  filepath.Join(dir, "data", "renomail.db"),
+	}
+	// A non-https webhook supplied via env must be rejected just like a config-file one.
+	t.Setenv("RENOMAIL_SLACK_WEBHOOK", "http://insecure.example/hook")
+
+	_, _, _, err := buildTUI(context.Background(), config.Config{}, paths)
+	if err == nil {
+		t.Fatal("buildTUI() = nil error, want rejection of a non-https env webhook")
+	}
+}
+
+func TestSlackWebhook_resolution(t *testing.T) {
+	cfg := config.Config{Slack: &config.SlackConfig{WebhookURL: "https://config.example/hook"}}
+
+	t.Run("env overrides config", func(t *testing.T) {
+		t.Setenv("RENOMAIL_SLACK_WEBHOOK", "https://env.example/hook")
+		if got := slackWebhook(cfg); got != "https://env.example/hook" {
+			t.Errorf("slackWebhook() = %q, want the env value", got)
+		}
+	})
+	t.Run("falls back to config", func(t *testing.T) {
+		t.Setenv("RENOMAIL_SLACK_WEBHOOK", "")
+		if got := slackWebhook(cfg); got != "https://config.example/hook" {
+			t.Errorf("slackWebhook() = %q, want the config value", got)
+		}
+	})
+	t.Run("empty when unconfigured", func(t *testing.T) {
+		t.Setenv("RENOMAIL_SLACK_WEBHOOK", "")
+		if got := slackWebhook(config.Config{}); got != "" {
+			t.Errorf("slackWebhook() = %q, want empty", got)
+		}
+	})
+}
+
 // TestRunTUI_runsAndQuits drives the full launch path headlessly: it feeds a "q"
 // keypress through an in-memory input and discards output, so the program starts,
 // processes the quit binding, and returns without a terminal.

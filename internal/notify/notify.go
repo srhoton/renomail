@@ -1,8 +1,11 @@
-// Package notify delivers lightweight, out-of-band notifications to the host
-// terminal multiplexer. Currently it targets tmux: when renomail runs inside a
-// tmux session, the UI can surface "new items arrived" on the status line without
-// stealing focus or switching windows. The package is intentionally tiny and
-// dependency-free (only os/exec) so it stays reusable and trivially testable.
+// Package notify delivers "new items arrived" notifications out of band. It offers
+// two independent channels: Tmux surfaces a transient message on the host tmux
+// status line (local, per-source, fired by the UI), and Slack posts a coalesced,
+// richly formatted digest to a Slack incoming webhook (remote, per-sweep, fired by
+// the sync engine). Both are optional and best-effort: a delivery failure is
+// returned to the caller to surface rather than crashing. The package keeps its
+// dependencies minimal (os/exec for tmux; net/http + encoding/json for Slack) so it
+// stays reusable and trivially testable.
 package notify
 
 import "os/exec"

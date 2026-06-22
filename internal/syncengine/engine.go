@@ -24,10 +24,10 @@ import (
 const defaultMaxConc = 8
 
 // Result is one provider's outcome for one sweep. Items is what Fetch returned
-// (already upserted by the engine); Inserted is how many of those rows were
-// genuinely new (not re-seen updates), which the UI uses to notify on fresh
-// arrivals; Err is non-nil when the fetch or upsert failed, in which case Items is
-// best-effort and usually empty (and Inserted is 0).
+// (already upserted by the engine); Inserted is how many genuinely-new items this
+// sweep produced for the source (deduped; re-seen updates excluded), which the UI
+// uses to notify on fresh arrivals; Err is non-nil when the fetch or upsert failed,
+// in which case Items is best-effort and usually empty (and Inserted is 0).
 type Result struct {
 	SourceID   string
 	SourceName string
@@ -35,6 +35,19 @@ type Result struct {
 	Inserted   int
 	Err        error
 }
+
+// DigestFunc posts a single notification summarizing one sweep's new items (e.g.
+// the Slack webhook digest). It is injected via SetDigestNotifier; a nil digest
+// disables it. The engine calls it once per steady-state sweep — never on the
+// initial sweep, which would dump a first run's entire backfill — after the sweep's
+// fetches complete, with every source's new items coalesced into one slice. It runs
+// in its own goroutine (tracked by digestWG) so a slow webhook never stalls the
+// engine's tick/trigger loop; a returned error is surfaced to the UI (as a Result
+// with Err) rather than crashing the sweep.
+type DigestFunc func(ctx context.Context, newItems []model.Item) error
+
+// digestTimeout bounds a single digest post so a hung webhook cannot run forever.
+const digestTimeout = 15 * time.Second
 
 // Engine fetches every provider on an interval and emits one Result per provider
 // per sweep on its events channel.
@@ -45,6 +58,8 @@ type Engine struct {
 	maxConc   int
 	out       chan Result
 	trigger   chan struct{}
+	digest    DigestFunc     // nil unless a per-sweep digest notifier is installed
+	digestWG  sync.WaitGroup // tracks in-flight digest posts so Run drains them before closing out
 }
 
 // New builds an Engine over the provider set, store, and re-sync interval. The
@@ -77,22 +92,30 @@ func (e *Engine) Trigger() {
 // returns (on context cancellation), so a ranging consumer terminates cleanly.
 func (e *Engine) Events() <-chan Result { return e.out }
 
+// SetDigestNotifier installs the per-sweep digest notifier (e.g. the Slack webhook
+// digest). It must be called before Run starts the engine goroutine; passing nil
+// leaves the digest disabled. See DigestFunc for the calling contract.
+func (e *Engine) SetDigestNotifier(fn DigestFunc) { e.digest = fn }
+
 // Run performs an immediate first sweep, then re-syncs on the interval — or
 // whenever Trigger requests an out-of-band sweep — until the context is cancelled,
-// at which point it closes the events channel and returns.
+// at which point it waits for any in-flight digest post to finish, then closes the
+// events channel and returns. Draining digestWG before the close is what makes the
+// asynchronous digest send-safe: no digest goroutine can send on out after it closes.
 func (e *Engine) Run(ctx context.Context) {
-	e.syncAll(ctx)
+	e.syncAll(ctx, true) // initial sweep: backfill, never digested
 	t := time.NewTicker(e.interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			e.digestWG.Wait()
 			close(e.out)
 			return
 		case <-t.C:
-			e.syncAll(ctx)
+			e.syncAll(ctx, false)
 		case <-e.trigger:
-			e.syncAll(ctx)
+			e.syncAll(ctx, false)
 		}
 	}
 }
@@ -109,13 +132,19 @@ func (e *Engine) Run(ctx context.Context) {
 // state is advanced only when its fetch+upsert succeeded; on failure its LastSync
 // is left untouched so the next sweep retries the same window rather than silently
 // skipping the messages it could not fetch.
-func (e *Engine) syncAll(ctx context.Context) {
+//
+// When a digest notifier is installed and this is not the initial sweep, every
+// provider's new items are collected and, after the sweep completes, posted as a
+// single coalesced digest (the per-source Results still stream to the UI as before).
+func (e *Engine) syncAll(ctx context.Context, initial bool) {
 	now := time.Now()
+	digesting := e.digest != nil && !initial
 
 	var (
 		g      errgroup.Group
 		mu     sync.Mutex
 		states []model.Source // successful providers' refreshed state, persisted in one batch
+		newAll []model.Item   // every provider's new items, coalesced for one digest post
 	)
 	g.SetLimit(e.maxConc)
 	for _, p := range e.providers {
@@ -126,13 +155,13 @@ func (e *Engine) syncAll(ctx context.Context) {
 			// alongside an error (e.g. Gmail harvesting the messages it did fetch
 			// before one Get failed); those items are still valid and must not be
 			// dropped.
-			var inserted int
+			var newItems []model.Item
 			if len(items) > 0 {
 				n, uerr := e.store.UpsertItems(ctx, items)
 				if uerr != nil && err == nil {
 					err = uerr
 				}
-				inserted = n
+				newItems = n
 			}
 			if err == nil {
 				st := source.StateOf(p, now)
@@ -140,8 +169,13 @@ func (e *Engine) syncAll(ctx context.Context) {
 				states = append(states, st)
 				mu.Unlock()
 			}
+			if digesting && len(newItems) > 0 {
+				mu.Lock()
+				newAll = append(newAll, newItems...)
+				mu.Unlock()
+			}
 			select {
-			case e.out <- Result{SourceID: p.ID(), SourceName: p.Name(), Items: items, Inserted: inserted, Err: err}:
+			case e.out <- Result{SourceID: p.ID(), SourceName: p.Name(), Items: items, Inserted: len(newItems), Err: err}:
 			case <-ctx.Done():
 				// The consumer is going away; deliberately discard this Result
 				// rather than block. Run will close the channel next.
@@ -154,6 +188,38 @@ func (e *Engine) syncAll(ctx context.Context) {
 	// Persist all successful sources in a single transaction (best-effort: a state
 	// write failure must not crash the sweep, so the error is intentionally dropped).
 	_ = e.store.UpsertSources(ctx, states)
+
+	if digesting && len(newAll) > 0 {
+		// Post asynchronously so a slow webhook never delays the next tick/trigger.
+		// digestWG lets Run wait for the post before closing out (see Run).
+		e.digestWG.Add(1)
+		go func() {
+			defer e.digestWG.Done()
+			e.postDigest(ctx, newAll)
+		}()
+	}
+}
+
+// postDigest delivers the sweep's coalesced new items to the injected digest
+// notifier under a bounded timeout. A failure is surfaced to the UI as a Result
+// with Err (rendered on the status line) rather than crashing the sweep; if the
+// consumer is already gone the error is dropped. It is a no-op once the context is
+// cancelled, so a shutdown does not emit spurious "context canceled" digest errors.
+func (e *Engine) postDigest(ctx context.Context, items []model.Item) {
+	if ctx.Err() != nil {
+		return
+	}
+	dctx, cancel := context.WithTimeout(ctx, digestTimeout)
+	defer cancel()
+	if err := e.digest(dctx, items); err != nil {
+		if ctx.Err() != nil {
+			return // cancelled mid-post: shutdown noise, not a real delivery failure
+		}
+		select {
+		case e.out <- Result{SourceName: "Slack", Err: err}:
+		case <-ctx.Done():
+		}
+	}
 }
 
 // sinceFor reads the source's stored LastSync, the lower bound for an incremental

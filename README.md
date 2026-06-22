@@ -94,11 +94,17 @@ go build ./cmd/renomail    # produces ./renomail
 
 ## Notifications
 
+renomail offers two independent "new items arrived" channels. Both skip the initial
+sweep on launch (so a first run does not announce its whole backfill) and both are
+best-effort — a delivery failure shows on the status line, never crashing the app.
+
+### tmux
+
 When renomail runs inside a **tmux** session, it posts a brief message to the tmux
 status line each time a background sync pulls in new items — e.g.
 `renomail: 3 new from Hacker News` — so you get a heads-up without switching back to
-its window. One message is sent per source that gained items; the initial sweep on
-launch is not announced. Outside tmux nothing is emitted.
+its window. One message is sent per source that gained items. Outside tmux nothing
+is emitted.
 
 This is on by default whenever `$TMUX` is set. To turn it off, add to your
 `config.toml`:
@@ -106,6 +112,24 @@ This is on by default whenever `$TMUX` is set. To turn it off, add to your
 ```toml
 tmux_notifications = false
 ```
+
+### Slack
+
+Point renomail at a Slack [incoming webhook](https://api.slack.com/messaging/webhooks)
+and it posts a single, richly formatted digest per sync sweep that finds new items —
+grouped by source, with linked titles (and the sender for emails), capped with a
+"…and N more" line. Coalescing into one message per sweep keeps it well under Slack's
+webhook rate limit.
+
+```toml
+[slack]
+webhook_url = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX"
+max_items   = 10   # optional; item lines per digest before "…and N more"
+```
+
+To keep the secret out of the config file, set `RENOMAIL_SLACK_WEBHOOK` instead — it
+takes precedence over `webhook_url`. Slack is disabled when neither is set. See
+[docs/CONFIG.md](docs/CONFIG.md#slack-notifications--slack) for details.
 
 ## Subcommands
 

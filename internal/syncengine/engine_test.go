@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -109,7 +111,7 @@ func TestSyncAll_upsertsAllAndEmitsOnePerProvider(t *testing.T) {
 	}}
 	e := New([]source.Provider{pA, pB}, st, time.Hour)
 
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	results := drain(t, e, 2)
 
 	if len(results) != 2 {
@@ -142,7 +144,7 @@ func TestSyncAll_reportsInsertedCount(t *testing.T) {
 	e := New([]source.Provider{p}, st, time.Hour)
 
 	// First sweep: both items are new.
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	first := drain(t, e, 1)
 	if first[0].Inserted != 2 {
 		t.Errorf("first sweep Inserted = %d, want 2 (both items new)", first[0].Inserted)
@@ -151,7 +153,7 @@ func TestSyncAll_reportsInsertedCount(t *testing.T) {
 	// Second sweep re-returns the same two items plus one new one; only the new
 	// one counts as inserted.
 	p.items = append(p.items, item("a", "a3", "Charlie", now.Add(-2*time.Hour)))
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	second := drain(t, e, 1)
 	if second[0].Inserted != 1 {
 		t.Errorf("re-sync Inserted = %d, want 1 (only the new item counts)", second[0].Inserted)
@@ -166,7 +168,7 @@ func TestSyncAll_errorReportsZeroInserted(t *testing.T) {
 	p := &mockProvider{id: "a", name: "A", err: errors.New("boom")}
 	e := New([]source.Provider{p}, st, time.Hour)
 
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	r := drain(t, e, 1)
 	if r[0].Inserted != 0 {
 		t.Errorf("failed sweep Inserted = %d, want 0", r[0].Inserted)
@@ -183,7 +185,7 @@ func TestSyncAll_oneError_othersStillUpserted(t *testing.T) {
 	good := &mockProvider{id: "good", name: "Good", items: []model.Item{item("good", "g1", "OK", now)}}
 	e := New([]source.Provider{bad, good}, st, time.Hour)
 
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	results := drain(t, e, 2)
 
 	byName := map[string]Result{}
@@ -218,7 +220,7 @@ func TestSyncAll_fetchError_doesNotAdvanceLastSync(t *testing.T) {
 	p := &mockProvider{id: "a", name: "A", err: errors.New("boom")}
 	e := New([]source.Provider{p}, st, time.Hour)
 
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	_ = drain(t, e, 1)
 
 	src, ok, err := st.GetSource(ctx, "a")
@@ -248,7 +250,7 @@ func TestSyncAll_partialItemsWithError_upsertedButNoAdvance(t *testing.T) {
 	}
 	e := New([]source.Provider{p}, st, time.Hour)
 
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	_ = drain(t, e, 1)
 
 	// The harvested item must be persisted despite the error.
@@ -279,7 +281,7 @@ func TestSyncAll_sinceIsStoredLastSync_andAdvances(t *testing.T) {
 	p := &mockProvider{id: "a", name: "A", items: []model.Item{item("a", "a1", "Alpha", now)}}
 	e := New([]source.Provider{p}, st, time.Hour)
 
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	_ = drain(t, e, 1)
 
 	if got := time.Unix(0, p.gotSince.Load()).UTC(); !got.Equal(prior) {
@@ -313,7 +315,7 @@ func TestSyncAll_concurrencyBounded(t *testing.T) {
 	e := New(providers, st, time.Hour)
 	e.maxConc = 3 // tighten below the provider count so the bound is observable
 
-	e.syncAll(ctx)
+	e.syncAll(ctx, false)
 	_ = drain(t, e, 10)
 
 	if got := peak.Load(); got > 3 {
@@ -401,5 +403,165 @@ func TestRun_cancelClosesChannel(t *testing.T) {
 		case <-deadline:
 			t.Fatal("channel not closed after context cancel")
 		}
+	}
+}
+
+// digestRecorder is a DigestFunc that records the calls and items it receives and
+// returns a configurable error. Its fields are mutex-guarded because the engine now
+// posts the digest from a separate goroutine, so snapshot may race the notify call;
+// notified signals each invocation so a test can wait for the async post.
+type digestRecorder struct {
+	mu       sync.Mutex
+	calls    int
+	items    []model.Item
+	err      error
+	notified chan struct{}
+}
+
+func newDigestRecorder(err error) *digestRecorder {
+	return &digestRecorder{err: err, notified: make(chan struct{}, 8)}
+}
+
+func (d *digestRecorder) notify(_ context.Context, items []model.Item) error {
+	d.mu.Lock()
+	d.calls++
+	d.items = append(d.items, items...)
+	err := d.err
+	d.mu.Unlock()
+	select {
+	case d.notified <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+func (d *digestRecorder) snapshot() (int, []model.Item) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls, slices.Clone(d.items)
+}
+
+// waitNotified blocks until the digest has been posted, failing if it does not
+// happen promptly.
+func (d *digestRecorder) waitNotified(t *testing.T) {
+	t.Helper()
+	select {
+	case <-d.notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("digest was not posted")
+	}
+}
+
+func TestSyncAll_digestCoalescesNewItemsAcrossSources(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now().UTC()
+
+	pA := &mockProvider{id: "a", name: "A", items: []model.Item{item("a", "a1", "Alpha", now)}}
+	pB := &mockProvider{id: "b", name: "B", items: []model.Item{item("b", "b1", "Bravo", now)}}
+	e := New([]source.Provider{pA, pB}, st, time.Hour)
+
+	rec := newDigestRecorder(nil)
+	e.SetDigestNotifier(rec.notify)
+
+	// A steady-state sweep posts one coalesced digest asynchronously; drain the two
+	// provider Results, then wait for the post to land.
+	e.syncAll(ctx, false)
+	_ = drain(t, e, 2)
+	rec.waitNotified(t)
+
+	calls, got := rec.snapshot()
+	if calls != 1 {
+		t.Fatalf("digest calls = %d, want exactly 1 per sweep", calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("digest items = %d, want 2 (one per source)", len(got))
+	}
+	titles := map[string]bool{}
+	for _, it := range got {
+		titles[it.Title] = true
+	}
+	if !titles["Alpha"] || !titles["Bravo"] {
+		t.Errorf("digest items = %v, want both Alpha and Bravo", got)
+	}
+}
+
+func TestSyncAll_digestSkippedOnInitialSweep(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now().UTC()
+
+	p := &mockProvider{id: "a", name: "A", items: []model.Item{item("a", "a1", "Alpha", now)}}
+	e := New([]source.Provider{p}, st, time.Hour)
+
+	rec := newDigestRecorder(nil)
+	e.SetDigestNotifier(rec.notify)
+
+	// The initial sweep backfills and must never trigger the digest, even though it
+	// inserts new rows.
+	e.syncAll(ctx, true)
+	_ = drain(t, e, 1)
+
+	select {
+	case <-rec.notified:
+		t.Fatal("digest must be skipped on the initial sweep")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if calls, _ := rec.snapshot(); calls != 0 {
+		t.Errorf("digest calls on initial sweep = %d, want 0", calls)
+	}
+}
+
+func TestSyncAll_digestErrorSurfacedAsResult(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now().UTC()
+
+	pA := &mockProvider{id: "a", name: "A", items: []model.Item{item("a", "a1", "Alpha", now)}}
+	pB := &mockProvider{id: "b", name: "B", items: []model.Item{item("b", "b1", "Bravo", now)}}
+	e := New([]source.Provider{pA, pB}, st, time.Hour)
+
+	boom := errors.New("slack webhook: status 500")
+	rec := newDigestRecorder(boom)
+	e.SetDigestNotifier(rec.notify)
+
+	// The error digest Result is emitted (from the async post goroutine) after the
+	// two provider Results, past the channel buffer; drain all three.
+	e.syncAll(ctx, false)
+	results := drain(t, e, 3)
+
+	var slack *Result
+	for i := range results {
+		if results[i].SourceName == "Slack" {
+			slack = &results[i]
+		}
+	}
+	if slack == nil {
+		t.Fatalf("no Slack digest Result emitted; got %+v", results)
+	}
+	if !errors.Is(slack.Err, boom) {
+		t.Errorf("Slack Result err = %v, want %v", slack.Err, boom)
+	}
+}
+
+func TestSyncAll_noDigestWhenNotInstalled(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now().UTC()
+
+	// Sanity: with no digest notifier, a steady-state sweep emits exactly one Result
+	// per provider and nothing else.
+	p := &mockProvider{id: "a", name: "A", items: []model.Item{item("a", "a1", "Alpha", now)}}
+	e := New([]source.Provider{p}, st, time.Hour)
+
+	e.syncAll(ctx, false)
+	got := drain(t, e, 1)
+	if got[0].Inserted != 1 {
+		t.Errorf("Inserted = %d, want 1", got[0].Inserted)
+	}
+	select {
+	case extra := <-e.Events():
+		t.Errorf("unexpected extra Result: %+v", extra)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

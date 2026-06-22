@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -81,5 +82,30 @@ func buildTUI(ctx context.Context, cfg config.Config, paths config.Paths) (ui.Mo
 	if os.Getenv("TMUX") != "" && cfg.NotifyEnabled() {
 		m.SetNotifier(notify.Tmux)
 	}
+	// When a Slack webhook is configured, post a coalesced per-sweep digest of new
+	// items. The env var takes precedence so the secret can stay out of the config
+	// file; the env read lives in the cmd layer to keep the engine/config pure. The
+	// https check mirrors config.Load's validation so an env-supplied webhook is held
+	// to the same standard (config-file webhooks are already validated at load).
+	if webhook := slackWebhook(cfg); webhook != "" {
+		if !strings.HasPrefix(webhook, "https://") {
+			_ = st.Close()
+			return ui.Model{}, nil, nil, fmt.Errorf("slack webhook must be an https URL")
+		}
+		eng.SetDigestNotifier(notify.NewSlack(webhook, cfg.SlackMaxItems()).Notify)
+	}
 	return m, st, eng, nil
+}
+
+// slackWebhook resolves the Slack incoming-webhook URL, preferring the
+// RENOMAIL_SLACK_WEBHOOK environment variable over the config file so the secret
+// need not be written to disk. Returns "" when Slack is not configured.
+func slackWebhook(cfg config.Config) string {
+	if env := os.Getenv("RENOMAIL_SLACK_WEBHOOK"); env != "" {
+		return env
+	}
+	if cfg.Slack != nil {
+		return cfg.Slack.WebhookURL
+	}
+	return ""
 }

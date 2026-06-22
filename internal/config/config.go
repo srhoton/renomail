@@ -20,6 +20,10 @@ const (
 	defaultLookback     = "30d"
 )
 
+// defaultSlackMaxItems is the digest item-line cap applied when [slack].max_items
+// is unset or non-positive.
+const defaultSlackMaxItems = 10
+
 // Config is the user-editable application configuration. It mirrors DESIGN.md §8.
 // Durations are stored as human-friendly strings and parsed on demand so the
 // TOML file stays readable.
@@ -35,6 +39,19 @@ type Config struct {
 	// tmux). It is a pointer so an absent key (default = enabled) is distinct from
 	// an explicit `tmux_notifications = false`.
 	TmuxNotifications *bool `toml:"tmux_notifications"`
+
+	// Slack configures a Slack incoming-webhook digest posted once per sync sweep
+	// that finds new items. It is a pointer so an absent [slack] table leaves Slack
+	// disabled. The webhook URL may instead come from the RENOMAIL_SLACK_WEBHOOK
+	// environment variable (resolved by the command layer), keeping the secret out
+	// of the config file.
+	Slack *SlackConfig `toml:"slack"`
+}
+
+// SlackConfig holds the Slack incoming-webhook settings.
+type SlackConfig struct {
+	WebhookURL string `toml:"webhook_url"` // https://hooks.slack.com/services/...; may be supplied via env instead
+	MaxItems   int    `toml:"max_items"`   // max item lines per digest; <= 0 selects the default
 }
 
 // GmailAccount identifies a Gmail account to pull. The address doubles as the
@@ -96,7 +113,23 @@ func Load(path string) (Config, error) {
 	if _, err := c.LookbackDuration(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
+	if err := c.validateSlack(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
 	return c, nil
+}
+
+// validateSlack rejects an obviously malformed webhook at load time (fail fast). An
+// empty webhook is allowed: it may be supplied via RENOMAIL_SLACK_WEBHOOK instead.
+func (c Config) validateSlack() error {
+	if c.Slack == nil {
+		return nil
+	}
+	url := strings.TrimSpace(c.Slack.WebhookURL)
+	if url != "" && !strings.HasPrefix(url, "https://") {
+		return errors.New("slack webhook_url must be an https URL")
+	}
+	return nil
 }
 
 // Save writes c to path as TOML, creating the parent directory if needed. The
@@ -134,6 +167,15 @@ func (c Config) LookbackDuration() (time.Duration, error) {
 // caller still gates on actually running inside tmux ($TMUX set).
 func (c Config) NotifyEnabled() bool {
 	return c.TmuxNotifications == nil || *c.TmuxNotifications
+}
+
+// SlackMaxItems returns the configured digest item-line cap, falling back to the
+// default when [slack] is absent or max_items is unset/non-positive.
+func (c Config) SlackMaxItems() int {
+	if c.Slack != nil && c.Slack.MaxItems > 0 {
+		return c.Slack.MaxItems
+	}
+	return defaultSlackMaxItems
 }
 
 // parseDurationDefault parses s, substituting def when s is empty.

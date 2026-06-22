@@ -317,7 +317,16 @@ account = "work@gmail.com"
 
 [[opml]]
 path = "~/feeds.opml"      # may list several; or use [[feed]] for one-offs
+
+[slack]                    # optional: per-sweep Slack webhook digest
+webhook_url = "https://hooks.slack.com/services/T/B/X"
+max_items   = 10
 ```
+
+`tmux_notifications` (bool, default on) gates the tmux status-line ping. The
+`[slack]` table configures the Slack digest (§9); its `webhook_url` may instead be
+supplied via `RENOMAIL_SLACK_WEBHOOK`, which takes precedence and keeps the secret
+off disk. Both are resolved in the cmd layer so `config`/`ui` stay env-free.
 
 ---
 
@@ -331,6 +340,20 @@ path = "~/feeds.opml"      # may list several; or use [[feed]] for one-offs
    `LastSync` as the `since`.
 4. Per-provider errors are captured into the batch message and surfaced in the
    status line — **one failing source never crashes the app or blocks others.**
+
+### 9.1 Notifications
+
+Two independent "new items arrived" channels, both skipping the initial backfill
+sweep and both best-effort (failures surface on the status line, never crash):
+
+- **tmux** (`notify.Tmux`): the UI fires one status-line ping per source that gained
+  items, gated on `$TMUX` and `tmux_notifications`.
+- **Slack** (`notify.Slack`): the engine owns this — it has the sweep boundary
+  (`syncAll`'s `errgroup.Wait`) and the new items (`store.UpsertItems` returns the
+  genuinely-new items, not just a count). After a non-initial sweep it coalesces
+  every source's new items into one Block Kit digest and posts it via an injected
+  `DigestFunc` under a bounded timeout. A post failure rides back as a synthetic
+  `Result{SourceName:"Slack", Err}` so the existing UI error path renders it.
 
 ---
 
