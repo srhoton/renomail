@@ -133,6 +133,72 @@ func TestView_rendersRowsWithDots(t *testing.T) {
 	}
 }
 
+func TestView_selectedLineCarriesCursorOthersDoNot(t *testing.T) {
+	m := newSized()
+	m.SetItems(testItems()) // index 0 ("Unread One") is selected by default
+
+	v := m.View()
+	lines := strings.Split(v, "\n")
+
+	findLine := func(title string) string {
+		t.Helper()
+		for _, ln := range lines {
+			if strings.Contains(ln, title) {
+				return ln
+			}
+		}
+		t.Fatalf("view has no line containing %q:\n%s", title, v)
+		return ""
+	}
+
+	// The selected row shows the "> " cursor; the other shows the blank "  " gutter.
+	// (Plain glyphs, so this holds regardless of lipgloss's color profile in tests.)
+	if sel := findLine("Unread One"); !strings.Contains(sel, "> ") {
+		t.Errorf("selected line missing the %q cursor:\n%s", "> ", sel)
+	}
+	if other := findLine("Read Two"); strings.Contains(other, "> ") {
+		t.Errorf("non-selected line wrongly shows the %q cursor:\n%s", "> ", other)
+	}
+}
+
+func TestView_narrowWidth_selectedRowStaysSingleLine(t *testing.T) {
+	m := New(styles.DefaultStyles())
+	m.SetSize(30, 6)            // narrow enough that the title budget clamps to minTitleCols
+	m.SetItems(testItems()[:1]) // a single, selected row
+
+	v := m.View()
+	nonBlank := 0
+	for ln := range strings.SplitSeq(v, "\n") {
+		if strings.TrimSpace(stripANSI(ln)) != "" {
+			nonBlank++
+		}
+	}
+	if nonBlank != 1 {
+		t.Errorf("selected row at narrow width spans %d visual lines, want 1:\n%q", nonBlank, v)
+	}
+}
+
+// stripANSI removes SGR escape sequences so a rendered line can be checked for
+// blankness regardless of lipgloss's color/background output.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			// Skip up to and including the terminating 'm' of the CSI sequence.
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			if i < len(s) {
+				i++ // consume the 'm'
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 func TestTruncate(t *testing.T) {
 	tests := []struct {
 		name string

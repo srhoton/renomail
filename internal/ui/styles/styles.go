@@ -14,6 +14,7 @@ import (
 type Styles struct {
 	Unread    lipgloss.Style // bright/bold feed rows for unread items
 	Read      lipgloss.Style // dimmed feed rows for already-read items
+	Selected  lipgloss.Style // background highlight for the feed row under the cursor
 	Header    lipgloss.Style // the reader's From/Title/Source/date header
 	StatusBar lipgloss.Style // the bottom status/help line
 }
@@ -34,10 +35,31 @@ func DefaultStyles() Styles {
 func stylesForBackground(dark bool) Styles {
 	lightDark := lipgloss.LightDark(dark)
 	header := lightDark(lipgloss.Color("63"), lipgloss.Color("141"))
+	// A muted gray bar so the selected line stands out without fighting the text
+	// colors. 252 and 238 are neighbours on the xterm-256 grayscale ramp (232=near
+	// black … 255=near white): a light gray on light terminals, a dark gray on dark
+	// ones — just off the terminal's default background so the bar reads as a
+	// highlight while bold/faint text stays legible on top.
+	selBg := lightDark(lipgloss.Color("252"), lipgloss.Color("238"))
 	return Styles{
 		Unread:    lipgloss.NewStyle().Bold(true),
 		Read:      lipgloss.NewStyle().Faint(true),
+		Selected:  lipgloss.NewStyle().Background(selBg),
 		Header:    lipgloss.NewStyle().Bold(true).Foreground(header),
 		StatusBar: lipgloss.NewStyle().Faint(true),
 	}
+}
+
+// RowStyle returns the style for a feed row: the bold (unread) / faint (read) base,
+// with the selection background layered on for the cursor line so the whole row
+// reads as a highlighted bar while keeping its emphasis.
+func (s Styles) RowStyle(read, selected bool) lipgloss.Style {
+	base := s.Unread
+	if read {
+		base = s.Read
+	}
+	if selected {
+		base = base.Background(s.Selected.GetBackground())
+	}
+	return base
 }
