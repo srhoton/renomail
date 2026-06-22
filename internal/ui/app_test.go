@@ -614,6 +614,10 @@ func TestUpdate_resizeInReader_reRendersBody(t *testing.T) {
 	if m.view != viewReader || m.openID != "a" {
 		t.Fatalf("precondition: view=%d openID=%q, want reader/a", m.view, m.openID)
 	}
+	// Let the open's body render settle first: renders are single-flight, so a resize
+	// only kicks off the re-wrap once the in-flight render has completed (the realistic
+	// runtime order — renders finish in milliseconds, well before a human resizes).
+	m, _ = step(t, m, bodyLoadedMsg{id: "a", rendered: "BODY-A"})
 
 	_, cmd := step(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
 	if cmd == nil {
@@ -1132,4 +1136,259 @@ func TestTeatest_feedShowsTitlesAndDots(t *testing.T) {
 
 	tm.Send(tea.KeyPressMsg{Code: 'q', Text: "q"})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+// twoUnreadModel returns a sized, loaded model whose feed holds two unread items
+// (selection on the first), with its events channel closed so runCmdMsgs never blocks
+// on the re-armed listener. Used to exercise the preview pane's follow + mark-read.
+func twoUnreadModel(t *testing.T) (Model, *store.Store) {
+	t.Helper()
+	st := newSeededStore(t)
+	items := []model.Item{
+		{
+			ID: "a", Kind: model.KindRSS, SourceName: "Feed A", Title: "Unread One",
+			Published: time.Now().Add(-1 * time.Hour), Read: false, BodyText: "body a",
+		},
+		{
+			// Older than "a", so it sorts to the second row: opening the pane lands on
+			// "a" and a single `j` moves the preview to "c".
+			ID: "c", Kind: model.KindRSS, SourceName: "Feed C", Title: "Unread Three",
+			Published: time.Now().Add(-90 * time.Minute), Read: false, BodyText: "body c",
+		},
+	}
+	if _, err := st.UpsertItems(context.Background(), items); err != nil {
+		t.Fatalf("UpsertItems() error = %v", err)
+	}
+	ch := make(chan syncengine.Result)
+	close(ch)
+	m, err := New(st, ch, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: items})
+	return m, st
+}
+
+func TestTogglePane_opensOnSelection(t *testing.T) {
+	m, st := loadedModel(t)
+	m, cmd := step(t, m, keyPress('p'))
+	if !m.split {
+		t.Fatal("split not set after p; pane did not open")
+	}
+	if m.openID != "a" {
+		t.Errorf("openID = %q, want the selected item %q", m.openID, "a")
+	}
+	if cmd == nil {
+		t.Fatal("opening the pane returned nil cmd, want a body-load (+ mark-read) command")
+	}
+	// Run the returned command's effects and confirm the selected item was actually
+	// marked read in the store — a non-nil-but-wrong cmd would otherwise pass.
+	runCmdMsgs(t, cmd())
+	items, err := st.Query(context.Background(), model.Filter{})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	for _, it := range items {
+		if it.ID == "a" && !it.Read {
+			t.Error("item a not marked read after opening it in the pane")
+		}
+	}
+}
+
+func TestTogglePane_secondPressCloses(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('p'))
+	m, _ = step(t, m, keyPress('p'))
+	if m.split {
+		t.Error("split still set after a second p; pane did not close")
+	}
+	// With the pane closed the view stacks only feed + status.
+	if v := m.View().Content; !strings.Contains(v, "Unread One") {
+		t.Errorf("feed missing after closing pane:\n%s", v)
+	}
+}
+
+func TestTogglePane_refusedWhenTerminalTooShort(t *testing.T) {
+	m, _ := newSeededModel(t)
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 80, Height: 6}) // childH = 5 < minSplitHeight
+	m, _ = step(t, m, itemsLoadedMsg{items: seedItems()})
+
+	m, _ = step(t, m, keyPress('p'))
+	if m.split {
+		t.Error("split set on a too-short terminal, want the toggle refused")
+	}
+	if !strings.Contains(m.status, "too short") {
+		t.Errorf("status = %q, want a too-short hint", m.status)
+	}
+}
+
+func TestTogglePane_followsSelectionAndMarksRead(t *testing.T) {
+	m, st := twoUnreadModel(t)
+	m, _ = step(t, m, keyPress('p')) // open the pane on "a"
+	if m.openID != "a" {
+		t.Fatalf("precondition openID = %q, want a", m.openID)
+	}
+
+	// Move down: the pane must follow to "c" and mark it read.
+	m, cmd := step(t, m, keyPress('j'))
+	if m.openID != "c" {
+		t.Fatalf("openID = %q after moving down, want the pane to follow to c", m.openID)
+	}
+	if cmd == nil {
+		t.Fatal("following the selection returned nil cmd, want a body-load + mark-read")
+	}
+	runCmdMsgs(t, cmd())
+
+	items, err := st.Query(context.Background(), model.Filter{})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	for _, it := range items {
+		if it.ID == "c" && !it.Read {
+			t.Error("item c not marked read after the pane followed to it")
+		}
+	}
+
+	// Re-pressing j at the bottom keeps the selection on c, so the pane must not
+	// re-trigger a load/mark-read (openID unchanged).
+	before := m.openID
+	m, _ = step(t, m, keyPress('j'))
+	if m.openID != before {
+		t.Errorf("openID changed to %q on a no-op move, want it to stay %q", m.openID, before)
+	}
+}
+
+func TestView_splitStacksFeedPaneAndStatusWithoutOverflow(t *testing.T) {
+	m, _ := loadedModel(t) // 100x30
+	m, _ = step(t, m, keyPress('p'))
+	// Land a rendered body in the pane so its region is identifiable.
+	m, _ = step(t, m, bodyLoadedMsg{id: "a", rendered: "PANE-BODY-MARKER"})
+
+	v := m.View().Content
+	if !strings.Contains(v, "Unread One") {
+		t.Errorf("split view missing the feed:\n%s", v)
+	}
+	if !strings.Contains(v, "PANE-BODY-MARKER") {
+		t.Errorf("split view missing the reading pane body:\n%s", v)
+	}
+	if !strings.Contains(v, "preview") {
+		t.Errorf("split view missing the status/help line:\n%s", v)
+	}
+	// The stacked layout must never exceed the terminal height (the overflow bug).
+	if lines := strings.Count(v, "\n") + 1; lines > m.h {
+		t.Errorf("split view is %d lines, exceeds terminal height %d:\n%s", lines, m.h, v)
+	}
+}
+
+func TestOpenFromPane_promotesToReaderWithoutReload(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('p'))                                      // pane open on "a"
+	m, _ = step(t, m, bodyLoadedMsg{id: "a", rendered: "KEEP-ME-MARKER"}) // body already loaded
+
+	m, cmd := step(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.view != viewReader {
+		t.Errorf("view = %d after Enter, want viewReader", m.view)
+	}
+	if cmd != nil {
+		t.Error("promoting the already-previewed item returned a cmd, want nil (no clear/reload)")
+	}
+	if got := m.reader.View(); !strings.Contains(got, "KEEP-ME-MARKER") {
+		t.Errorf("reader body was cleared on promote, want it preserved:\n%s", got)
+	}
+}
+
+func TestBackFromReader_restoresOpenSplit(t *testing.T) {
+	m, _ := loadedModel(t)
+	m, _ = step(t, m, keyPress('p'))
+	m, _ = step(t, m, bodyLoadedMsg{id: "a", rendered: "PANE-BODY-MARKER"})
+	m, _ = step(t, m, tea.KeyPressMsg{Code: tea.KeyEnter}) // promote to full reader
+
+	m, _ = step(t, m, tea.KeyPressMsg{Code: tea.KeyEscape}) // back to feed
+	if m.view != viewFeed {
+		t.Errorf("view = %d after Esc, want viewFeed", m.view)
+	}
+	if !m.split {
+		t.Error("split cleared on Esc, want the pane restored")
+	}
+	v := m.View().Content
+	if !strings.Contains(v, "Unread One") || !strings.Contains(v, "PANE-BODY-MARKER") {
+		t.Errorf("restored split missing feed or pane:\n%s", v)
+	}
+}
+
+func TestReadToggled_paneOpenUnderUnreadFilter_keepsRowAndStaysSynced(t *testing.T) {
+	m, _ := twoUnreadModel(t)
+	m.filter.Read = model.ReadUnreadOnly // unread-only: the common RSS reading mode
+
+	m, _ = step(t, m, keyPress('p')) // open the pane on "a"
+	if !m.split || m.openID != "a" {
+		t.Fatalf("precondition split=%v openID=%q, want true/a", m.split, m.openID)
+	}
+
+	// The persisted read confirmation for the previewed item arrives. With the pane
+	// open it must NOT remove the row (which would desync the live pane and cascade the
+	// whole unread list away); the row stays, dimmed, and the pane keeps tracking it.
+	m, cmd := step(t, m, readToggledMsg{id: "a", read: true})
+	if cmd != nil {
+		t.Errorf("readToggledMsg under an open pane returned a cmd %v, want nil (no re-query)", cmd)
+	}
+	if m.openID != "a" {
+		t.Errorf("openID = %q after read-confirm, want it to stay a (pane in sync)", m.openID)
+	}
+	if v := m.feed.View(); !strings.Contains(v, "Unread One") {
+		t.Errorf("row was removed under the open pane, want it kept in place:\n%s", v)
+	}
+
+	// Sanity: with the pane CLOSED the original remove-on-read behavior is preserved.
+	m2, _ := twoUnreadModel(t)
+	m2.filter.Read = model.ReadUnreadOnly
+	m2, _ = step(t, m2, readToggledMsg{id: "a", read: true})
+	if v := m2.feed.View(); strings.Contains(v, "Unread One") {
+		t.Errorf("with the pane closed the read row should be removed under unread-only:\n%s", v)
+	}
+}
+
+func TestPreview_singleFlight_coalescesConcurrentRenders(t *testing.T) {
+	m, _ := twoUnreadModel(t)
+
+	// Open the pane on "a": one render is now in flight.
+	m, _ = step(t, m, keyPress('p'))
+	if !m.loading {
+		t.Fatal("loading not set after opening the pane, want a render in flight")
+	}
+
+	// Move to "c" while the first render is still running. The pane must follow
+	// (openID, header) and mark "c" read, but must NOT spawn a second render — the gate
+	// coalesces a scroll burst to one render at a time (the renderer is lock-safe, but
+	// rendering every fly-over row would be wasted work).
+	m, _ = step(t, m, keyPress('j'))
+	if m.openID != "c" {
+		t.Fatalf("openID = %q after moving, want c", m.openID)
+	}
+	if !m.loading {
+		t.Error("loading cleared while a render is still in flight (single-flight broken)")
+	}
+
+	// The first (now stale) render finishes. Its content must be discarded, and the
+	// trailing edge must kick off the load for the current selection ("c").
+	m, cmd := step(t, m, bodyLoadedMsg{id: "a", rendered: "STALE-BODY-A"})
+	if got := m.reader.View(); strings.Contains(got, "STALE-BODY-A") {
+		t.Errorf("stale body for a leaked into the pane:\n%s", got)
+	}
+	if cmd == nil {
+		t.Fatal("stale completion returned nil cmd, want the trailing load for c")
+	}
+	if !m.loading {
+		t.Error("loading not set for the trailing render, want single-flight re-armed")
+	}
+
+	// The current selection's render finishes and lands in the pane; the gate frees.
+	m, _ = step(t, m, bodyLoadedMsg{id: "c", rendered: "FRESH-BODY-C"})
+	if m.loading {
+		t.Error("loading still set after the current render completed")
+	}
+	if got := m.reader.View(); !strings.Contains(got, "FRESH-BODY-C") {
+		t.Errorf("current body for c missing from the pane:\n%s", got)
+	}
 }

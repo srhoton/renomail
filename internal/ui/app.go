@@ -32,6 +32,15 @@ import (
 // WindowSizeMsg arrives with the real terminal size.
 const defaultWidth = 80
 
+// minSplitHeight is the smallest child area (terminal height minus the status row)
+// that can host both a usable feed and the reading pane. The pane's floor is the
+// reader's chrome (reader.headerLines == 3, currently 2 header rows + 1 blank) plus at
+// least one body line — i.e. 4 — and the feed needs a comparable few rows to navigate,
+// so the half-and-half split needs roughly 2×4. Below this the split is refused /
+// auto-closed so the stacked layout never overflows the screen. (The max(…,1) guards in
+// applyLayout keep it from overflowing even if this drifts; this is the comfort floor.)
+const minSplitHeight = 8
+
 // view enumerates the routable screens: the feed list, the reader, and the search
 // filter bar. Help is an in-place toggle on the feed (m.help.ShowAll), not a
 // separate screen.
@@ -58,6 +67,8 @@ type Model struct {
 	theme     styles.Styles
 	openID    string     // id of the item currently open in the reader (stale-load guard)
 	openItem  model.Item // the item currently open in the reader (for resize re-render / open-in-browser)
+	split     bool       // whether the bottom reading/preview pane is open (overlay on viewFeed)
+	loading   bool       // a body render is in flight; gates render.Renderer to one at a time
 	status    string
 	hint      string // cached status-bar filter description; refreshed only on filter change
 	helpView  string // cached help line; refreshed only on resize / help toggle
@@ -154,6 +165,24 @@ func (m *Model) SetNotifier(fn func(string) error) {
 // — so the per-frame statusBar never rebuilds it.
 func (m *Model) refreshHelp() { m.helpView = m.help.View(m.keys) }
 
+// applyLayout sizes the child views for the current terminal size, active view, and
+// split state, reserving one row for the status/help line. With the preview pane open
+// on the feed, the remaining height is divided into a top half for the feed and a
+// bottom half for the reader pane; otherwise the active child takes the full area. It
+// is called on resize and whenever the split state or view changes.
+func (m *Model) applyLayout() {
+	childH := max(m.h-1, 1) // leave a row for the status/help line
+	if m.view == viewFeed && m.split {
+		paneH := max(childH/2, 1)     // bottom half for the reading pane
+		feedH := max(childH-paneH, 1) // top half for the feed
+		m.feed.SetSize(m.w, feedH)
+		m.reader.SetSize(m.w, paneH)
+		return
+	}
+	m.feed.SetSize(m.w, childH)
+	m.reader.SetSize(m.w, childH)
+}
+
 // warnStatus renders provider-construction warnings into a compact startup status
 // string (e.g. an un-authorized Gmail account prompting `renomail auth`). The
 // empty string when there are none keeps the status line clean.
@@ -189,23 +218,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_ = m.renderer.SetWidth(msg.Width)
 		m.help.SetWidth(msg.Width)
 		m.refreshHelp()
-		childH := max(msg.Height-1, 1) // leave a row for the status/help line
-		m.feed.SetSize(msg.Width, childH)
-		m.reader.SetSize(msg.Width, childH)
-		// Re-render the open item at the new width so the reader re-wraps instead of
-		// keeping the previous width's layout. The body is already cached (the item is
-		// open), so a nil provider reads straight from the store — no network fetch.
-		if m.view == viewReader && m.openID != "" {
-			return m, loadBodyCmd(m.store, m.renderer, nil, m.openItem)
+		// A terminal that has shrunk below the split's minimum can no longer host both
+		// the feed and the pane without overflowing; close the pane so the layout stays
+		// within the screen.
+		if m.split && max(msg.Height-1, 1) < minSplitHeight {
+			m.split = false
+		}
+		m.applyLayout()
+		// Re-render the open item at the new width so it re-wraps instead of keeping the
+		// previous width's layout. The body is already cached (the item is open), so a
+		// nil provider reads straight from the store — no network fetch. This covers
+		// both the full-screen reader and the preview pane (both render m.reader). The
+		// load goes through the single-flight gate so a resize mid-scroll never starts a
+		// second concurrent render.
+		if m.openID != "" && (m.view == viewReader || m.split) {
+			return m, m.loadBody(nil, m.openItem)
 		}
 		return m, nil
 	case itemsLoadedMsg:
 		return m, m.feed.SetItems(msg.items)
 	case bodyLoadedMsg:
-		// Ignore a body that finished rendering after the user opened a different
-		// item (or none): only the currently-open item's body belongs in the
-		// reader. This prevents a slow render from clobbering newer content.
+		// This render has finished, so the single-flight gate is free again.
+		m.loading = false
+		// A body that finished after the selection moved on (or the item closed) is
+		// stale: only the currently-open item's body belongs in the reader, so don't
+		// show it. If a newer item is open, kick off its load now — this is the
+		// trailing edge of the single-flight gate, so a burst of scroll keys collapses
+		// into one render of the row the cursor settled on.
 		if msg.id != m.openID {
+			if m.openID != "" && (m.view == viewReader || m.split) {
+				return m, m.loadBody(m.providerFor(m.openItem), m.openItem)
+			}
 			return m, nil
 		}
 		if msg.err != nil {
@@ -234,9 +277,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// place rather than re-querying the whole feed (only this one item
 		// changed). Otherwise confirm the flag in place (a no-op when the caller
 		// already flipped it optimistically).
+		//
+		// Exception: while the preview pane is open the selection is live, so a row
+		// vanishing under the cursor would desync the pane (it would keep showing the
+		// just-removed item while the list auto-advances). Following the cursor also
+		// marks each previewed row read, so removing-on-read would cascade the whole
+		// unread list away. Instead, dim the row in place and let it reconcile out on
+		// the next reload (filter change / background re-query).
 		leaves := (m.filter.Read == model.ReadUnreadOnly && msg.read) ||
 			(m.filter.Read == model.ReadReadOnly && !msg.read)
-		if leaves {
+		if leaves && !m.split {
 			m.feed.RemoveLocal(msg.id)
 			return m, nil
 		}
@@ -331,6 +381,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case viewReader:
 		if key.Matches(msg, m.keys.Back) {
 			m.view = viewFeed
+			// Restore the layout: if the preview pane was open, the feed shrinks back to
+			// the top half and the pane reappears showing the same item.
+			m.applyLayout()
 			return m, nil
 		}
 	}
@@ -436,38 +489,117 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// dispatch, so this survives until the next keypress.
 		m.status = "marked " + sourceLabel(it) + " read"
 		return m, markAllReadCmd(m.store, model.Filter{SourceIDs: map[string]bool{it.SourceID: true}})
+	case key.Matches(msg, m.keys.TogglePane):
+		// Refuse to open the pane when the screen is too short to host both regions
+		// without overflowing; surface a hint instead of a broken layout.
+		if !m.split && max(m.h-1, 1) < minSplitHeight {
+			m.status = "terminal too short for the reading pane"
+			return m, nil
+		}
+		m.split = !m.split
+		m.applyLayout()
+		if !m.split {
+			return m, nil
+		}
+		it, ok := m.feed.Selected()
+		if !ok {
+			return m, nil // empty feed: the pane opens empty and fills on first selection
+		}
+		return m, m.openInPane(it)
 	case key.Matches(msg, m.keys.Open):
 		it, ok := m.feed.Selected()
 		if !ok {
 			return m, nil
 		}
-		m.openID = it.ID
-		m.openItem = it // retained for resize re-render and open-in-browser
-		m.reader.SetHeader(it)
-		// Clear any previous body so the prior item does not flash under the
-		// new header while this item's body renders asynchronously.
-		m.reader.SetContent("")
+		// Promote to the full-screen reader. When the preview pane is already showing
+		// this exact item, just grow it: keep the loaded body (no clear/reload, no
+		// flash) and let applyLayout resize the viewport to full height. The renderer
+		// width is the full terminal width regardless of pane height, so no re-wrap is
+		// needed.
+		already := m.split && m.openID == it.ID
 		m.view = viewReader
-		// Pass the item's provider so the body load can fall back to a network
-		// fetch when the stored body is empty (Gmail). A nil entry (RSS, or an
-		// unknown source) skips the fallback — RSS bodies are already cached — as
-		// does an item already hydrated this session, so a repeat open never re-hits
-		// the network.
-		prov := m.providers[it.SourceID]
-		if m.hydrated[it.ID] {
-			prov = nil
+		m.applyLayout()
+		if already {
+			return m, nil
 		}
-		cmds := []tea.Cmd{loadBodyCmd(m.store, m.renderer, prov, it)}
-		// Opening an item marks it read (DESIGN §6.5): flip the row now (by id, the
-		// same stale-safe path used everywhere else) so the dot updates on return,
-		// and persist the flag in the background.
-		if !it.Read {
-			m.feed.SetReadLocal(it.ID, true)
-			cmds = append(cmds, setReadCmd(m.store, it.ID, true))
-		}
-		return m, tea.Batch(cmds...)
+		return m, m.openInPane(it)
 	}
-	return m.routeToChild(msg)
+	// Fall through: forward the key to the feed list (motion, etc.). When the preview
+	// pane is open, mirror it to the (possibly moved) selection so it tracks the cursor.
+	var cmd tea.Cmd
+	m.feed, cmd = m.feed.Update(msg)
+	if prev := m.previewSelection(); prev != nil {
+		return m, tea.Batch(cmd, prev)
+	}
+	return m, cmd
+}
+
+// openInPane points the reader at it: sets the header, clears the stale body, records
+// it as the open item, starts the async body load, and marks it read (DESIGN §6.5). It
+// is the shared path for opening an item full-screen, opening the preview pane, and
+// following the selection while the pane is open.
+//
+// Marking read flips the row optimistically by id (the stale-safe path used everywhere
+// else); setReadCmd persists it and readToggledMsg confirms. When the pane follows the
+// cursor this fires for every previewed row — the intended "seeing marks it read"
+// behavior — so m.openItem is now updated on plain motion keys in split mode, not only
+// on an explicit open (current() still keys off m.view, so its staleness caveat holds).
+//
+// The body render goes through loadBody so at most one render runs at a time; on a fast
+// scroll the intermediate rows update the header and mark read, but only the settled
+// row is actually rendered (see loadBody / the bodyLoadedMsg trailing edge).
+func (m *Model) openInPane(it model.Item) tea.Cmd {
+	m.openID = it.ID
+	m.openItem = it // retained for resize re-render and open-in-browser
+	m.reader.SetHeader(it)
+	m.reader.SetContent("")
+	cmds := []tea.Cmd{m.loadBody(m.providerFor(it), it)}
+	if !it.Read {
+		m.feed.SetReadLocal(it.ID, true)
+		cmds = append(cmds, setReadCmd(m.store, it.ID, true))
+	}
+	return tea.Batch(cmds...)
+}
+
+// providerFor returns the provider whose network body-fetch fallback should be used
+// when the stored body is empty (Gmail). It returns nil — skipping the fallback — for
+// an unknown source, for RSS (bodies are already cached), and for an item already
+// hydrated this session, so a repeat open never re-hits the network.
+func (m Model) providerFor(it model.Item) source.Provider {
+	if m.hydrated[it.ID] {
+		return nil
+	}
+	return m.providers[it.SourceID]
+}
+
+// loadBody returns a command that renders the open item's body, coalescing renders to
+// one in flight at a time. render.Renderer is safe for concurrent use (it locks
+// internally), so this gate is an efficiency measure, not a safety requirement: when a
+// render is already running it returns nil and the bodyLoadedMsg handler issues the
+// next load for the then-current selection, so a burst of scroll keys collapses to a
+// single render of the row the cursor settles on instead of one render per row (most of
+// them immediately stale).
+func (m *Model) loadBody(prov source.Provider, it model.Item) tea.Cmd {
+	if m.loading {
+		return nil
+	}
+	m.loading = true
+	return loadBodyCmd(m.store, m.renderer, prov, it)
+}
+
+// previewSelection re-points the open pane at the current feed selection when it has
+// moved to a different item, so the pane tracks the cursor (and marks each previewed
+// item read). It returns nil when the pane is closed or the selection is unchanged, so
+// background updates and same-row keys never re-trigger a load or a spurious mark-read.
+func (m *Model) previewSelection() tea.Cmd {
+	if !m.split {
+		return nil
+	}
+	it, ok := m.feed.Selected()
+	if !ok || it.ID == m.openID {
+		return nil
+	}
+	return m.openInPane(it)
 }
 
 // handleFilterKey handles the search bar: ctrl+c still quits, Esc cancels (keeping
@@ -525,7 +657,14 @@ func (m Model) View() tea.View {
 	case viewFilter:
 		content = m.feed.View() + "\n" + m.filterbar.View()
 	default:
-		content = m.feed.View() + "\n" + m.statusBar()
+		// With the preview pane open, stack it between the feed (top half) and the
+		// status line. reader.View() renders exactly the pane's height in rows, so
+		// feedH + paneH + 1 (status) == h with no overflow.
+		if m.split {
+			content = m.feed.View() + "\n" + m.reader.View() + "\n" + m.statusBar()
+		} else {
+			content = m.feed.View() + "\n" + m.statusBar()
+		}
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
