@@ -72,14 +72,16 @@ func (d delegate) Render(w io.Writer, m list.Model, index int, li list.Item) {
 		return
 	}
 
-	dot, style := "○", d.styles.Read
+	dot := "○"
 	if !r.item.Read {
-		dot, style = "●", d.styles.Unread
+		dot = "●"
 	}
+	selected := index == m.Index()
 	cursor := "  "
-	if index == m.Index() {
+	if selected {
 		cursor = "> "
 	}
+	style := d.styles.RowStyle(r.item.Read, selected)
 
 	// The title flexes to fill whatever the fixed columns and the age leave.
 	titleCols := max(m.Width()-fixedCols-runewidth.StringWidth(r.age), minTitleCols)
@@ -100,7 +102,21 @@ func (d delegate) Render(w io.Writer, m list.Model, index int, li list.Item) {
 	b.WriteString(title)
 	b.WriteString("  ")
 	b.WriteString(r.age)
-	_, _ = io.WriteString(w, style.Render(b.String()))
+
+	// Cap the assembled line to the viewport width so a row never wraps onto a
+	// second line: the delegate is Height()==1, and a wrapped row would desync the
+	// list's row accounting. The title budget can clamp to minTitleCols on a narrow
+	// terminal, pushing the line past the width; truncating here keeps every row to
+	// exactly one line. For the selected row, .Width then pads the (capped) line so
+	// the highlight bar still spans the full width.
+	line := b.String()
+	if width := m.Width(); width > 0 {
+		line = runewidth.Truncate(line, width, "")
+		if selected {
+			style = style.Width(width)
+		}
+	}
+	_, _ = io.WriteString(w, style.Render(line))
 }
 
 // Model wraps a bubbles/list configured as a full-screen, chrome-free feed.
