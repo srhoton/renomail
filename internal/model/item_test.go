@@ -58,3 +58,23 @@ func TestStableID_distinctInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestReadState_Next(t *testing.T) {
+	tests := []struct {
+		name string
+		in   ReadState
+		want ReadState
+	}{
+		{"any cycles to unread-only", ReadAny, ReadUnreadOnly},
+		{"unread-only cycles to read-only", ReadUnreadOnly, ReadReadOnly},
+		{"read-only cycles back to any", ReadReadOnly, ReadAny},
+		{"out of range falls back to any", ReadState(99), ReadAny},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.in.Next(); got != tt.want {
+				t.Errorf("ReadState(%d).Next() = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}

@@ -576,14 +576,20 @@ func TestHandleFeedKey_filterRSS_setsKind(t *testing.T) {
 	}
 }
 
-func TestHandleFeedKey_filterUnread_setsReadState(t *testing.T) {
+func TestHandleFeedKey_cycleRead_cyclesReadState(t *testing.T) {
 	m, _ := loadedModel(t)
-	m, cmd := step(t, m, keyPress('u'))
-	if m.filter.Read != model.ReadUnreadOnly {
-		t.Errorf("u set Read = %v, want ReadUnreadOnly", m.filter.Read)
-	}
-	if cmd == nil {
-		t.Error("u returned nil cmd, want a re-query")
+	// Starting from ReadAny, u cycles all -> unread-only -> read-only -> all,
+	// re-querying on every press.
+	want := []model.ReadState{model.ReadUnreadOnly, model.ReadReadOnly, model.ReadAny}
+	for i, w := range want {
+		var cmd tea.Cmd
+		m, cmd = step(t, m, keyPress('u'))
+		if m.filter.Read != w {
+			t.Errorf("press %d: Read = %v, want %v", i+1, m.filter.Read, w)
+		}
+		if cmd == nil {
+			t.Errorf("press %d: u returned nil cmd, want a re-query", i+1)
+		}
 	}
 }
 
@@ -703,15 +709,49 @@ func TestHandleFeedKey_toggleRead_flipsAndPersists(t *testing.T) {
 	}
 }
 
-func TestUpdate_readToggled_unreadOnly_reQueries(t *testing.T) {
-	m, _ := loadedModel(t)
-	m.filter.Read = model.ReadUnreadOnly
-	_, cmd := step(t, m, readToggledMsg{id: "a", read: true})
-	if cmd == nil {
-		t.Fatal("readToggledMsg under unread-only returned nil cmd, want re-query")
+// TestUpdate_readToggled_leavesActiveFilter covers both directions in which a read
+// toggle pushes an item out of the active read filter: a now-read item under the
+// unread-only filter, and a now-unread item under the read-only filter. In each
+// case the affected row is dropped from the feed in place (no re-query / nil cmd),
+// and only that row — the sibling stays.
+func TestUpdate_readToggled_leavesActiveFilter(t *testing.T) {
+	tests := []struct {
+		name      string
+		filter    model.ReadState
+		id        string // item whose read flag was toggled
+		read      bool   // its new read state
+		gone      string // title that must disappear from the feed
+		remaining string // title that must remain
+	}{
+		{
+			name:   "unread-only filter drops a now-read item",
+			filter: model.ReadUnreadOnly,
+			id:     "a", read: true,
+			gone: "Unread One", remaining: "Read Two",
+		},
+		{
+			name:   "read-only filter drops a now-unread item",
+			filter: model.ReadReadOnly,
+			id:     "b", read: false,
+			gone: "Read Two", remaining: "Unread One",
+		},
 	}
-	if _, ok := cmd().(itemsLoadedMsg); !ok {
-		t.Error("readToggledMsg under unread-only did not re-query")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := loadedModel(t)
+			m.filter.Read = tt.filter
+			m, cmd := step(t, m, readToggledMsg{id: tt.id, read: tt.read})
+			if cmd != nil {
+				t.Error("readToggledMsg leaving the filter returned a non-nil cmd, want nil (row dropped in place)")
+			}
+			view := m.feed.View()
+			if strings.Contains(view, tt.gone) {
+				t.Errorf("feed still shows %q after it left the filter:\n%s", tt.gone, view)
+			}
+			if !strings.Contains(view, tt.remaining) {
+				t.Errorf("feed dropped the wrong row; %q is missing:\n%s", tt.remaining, view)
+			}
+		})
 	}
 }
 

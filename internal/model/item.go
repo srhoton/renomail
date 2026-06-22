@@ -32,6 +32,20 @@ const (
 	ReadReadOnly
 )
 
+// Next returns the next read filter in the cycle:
+// ReadAny -> ReadUnreadOnly -> ReadReadOnly -> ReadAny. It drives the single-key
+// read-filter toggle in the TUI; an out-of-range value falls back to ReadAny.
+func (r ReadState) Next() ReadState {
+	switch r {
+	case ReadAny:
+		return ReadUnreadOnly
+	case ReadUnreadOnly:
+		return ReadReadOnly
+	default: // ReadReadOnly or out of range
+		return ReadAny
+	}
+}
+
 // Item is the unified feed unit: both an email and an RSS entry map onto it.
 type Item struct {
 	ID         string    // stable: sha256(sourceID + nativeID)

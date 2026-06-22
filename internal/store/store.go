@@ -66,9 +66,15 @@ CREATE TABLE IF NOT EXISTS items (
   read INTEGER DEFAULT 0, body_html TEXT, body_text TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_items_published ON items(published DESC);
-CREATE INDEX IF NOT EXISTS idx_items_read      ON items(read);
 CREATE INDEX IF NOT EXISTS idx_items_kind      ON items(kind);
 CREATE INDEX IF NOT EXISTS idx_items_source    ON items(source_id);
+-- The read filter is always combined with "ORDER BY published DESC, id DESC", so a
+-- composite (read, published DESC) lets a read-filtered query use one index for both
+-- the filter and the dominant published ordering (only the id tie-break still sorts).
+-- Its leading "read" column also serves bare "read = ?" lookups, making the old
+-- single-column idx_items_read redundant; drop it.
+DROP INDEX IF EXISTS idx_items_read;
+CREATE INDEX IF NOT EXISTS idx_items_read_published ON items(read, published DESC);
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY, kind TEXT, name TEXT,

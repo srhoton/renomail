@@ -12,6 +12,7 @@ func TestDefault_bindingsAreSet(t *testing.T) {
 		"Up": k.Up, "Down": k.Down, "Top": k.Top, "Bottom": k.Bottom,
 		"Open": k.Open, "Back": k.Back, "Quit": k.Quit, "Help": k.Help,
 		"OpenBrowser": k.OpenBrowser, "ForceSync": k.ForceSync,
+		"CycleRead": k.CycleRead,
 	} {
 		if len(b.Keys()) == 0 {
 			t.Errorf("binding %q has no keys", name)
@@ -21,7 +22,7 @@ func TestDefault_bindingsAreSet(t *testing.T) {
 
 func TestFullHelp_includesActionBindings(t *testing.T) {
 	k := Default()
-	want := map[string]bool{"o": false, "R": false} // OpenBrowser, ForceSync
+	want := map[string]bool{"o": false, "R": false, "u": false} // OpenBrowser, ForceSync, CycleRead
 	for _, col := range k.FullHelp() {
 		for _, b := range col {
 			for _, key := range b.Keys() {
