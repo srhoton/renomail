@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/srhoton/renomail/internal/config"
+	"github.com/srhoton/renomail/internal/notify"
 	"github.com/srhoton/renomail/internal/source/rss"
 	"github.com/srhoton/renomail/internal/store"
 	"github.com/srhoton/renomail/internal/syncengine"
@@ -73,6 +74,12 @@ func buildTUI(ctx context.Context, cfg config.Config, paths config.Paths) (ui.Mo
 	if err != nil {
 		_ = st.Close()
 		return ui.Model{}, nil, nil, err
+	}
+	// When running inside tmux (and not disabled in config), surface new items on
+	// the tmux status line as they arrive. Detection is automatic via $TMUX; the
+	// env read lives here in the cmd layer so the ui package stays pure.
+	if os.Getenv("TMUX") != "" && cfg.NotifyEnabled() {
+		m.SetNotifier(notify.Tmux)
 	}
 	return m, st, eng, nil
 }

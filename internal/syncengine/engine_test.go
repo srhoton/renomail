@@ -130,6 +130,49 @@ func TestSyncAll_upsertsAllAndEmitsOnePerProvider(t *testing.T) {
 	}
 }
 
+func TestSyncAll_reportsInsertedCount(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	now := time.Now().UTC()
+
+	p := &mockProvider{id: "a", name: "A", items: []model.Item{
+		item("a", "a1", "Alpha", now),
+		item("a", "a2", "Bravo", now.Add(-time.Hour)),
+	}}
+	e := New([]source.Provider{p}, st, time.Hour)
+
+	// First sweep: both items are new.
+	e.syncAll(ctx)
+	first := drain(t, e, 1)
+	if first[0].Inserted != 2 {
+		t.Errorf("first sweep Inserted = %d, want 2 (both items new)", first[0].Inserted)
+	}
+
+	// Second sweep re-returns the same two items plus one new one; only the new
+	// one counts as inserted.
+	p.items = append(p.items, item("a", "a3", "Charlie", now.Add(-2*time.Hour)))
+	e.syncAll(ctx)
+	second := drain(t, e, 1)
+	if second[0].Inserted != 1 {
+		t.Errorf("re-sync Inserted = %d, want 1 (only the new item counts)", second[0].Inserted)
+	}
+}
+
+func TestSyncAll_errorReportsZeroInserted(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	// A pure failure (no harvested items) must report zero inserts.
+	p := &mockProvider{id: "a", name: "A", err: errors.New("boom")}
+	e := New([]source.Provider{p}, st, time.Hour)
+
+	e.syncAll(ctx)
+	r := drain(t, e, 1)
+	if r[0].Inserted != 0 {
+		t.Errorf("failed sweep Inserted = %d, want 0", r[0].Inserted)
+	}
+}
+
 func TestSyncAll_oneError_othersStillUpserted(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)

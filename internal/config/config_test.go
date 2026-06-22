@@ -146,6 +146,53 @@ func TestLookbackDuration(t *testing.T) {
 	}
 }
 
+func TestNotifyEnabled(t *testing.T) {
+	yes, no := true, false
+	tests := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{name: "absent key defaults on", cfg: Config{}, want: true},
+		{name: "explicit true", cfg: Config{TmuxNotifications: &yes}, want: true},
+		{name: "explicit false", cfg: Config{TmuxNotifications: &no}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.NotifyEnabled(); got != tt.want {
+				t.Errorf("NotifyEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoad_tmuxNotifications_parsesOptOut(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+		want bool
+	}{
+		{name: "absent stays on", toml: "sync_interval = \"5m\"\n", want: true},
+		{name: "explicit false disables", toml: "tmux_notifications = false\n", want: false},
+		{name: "explicit true enables", toml: "tmux_notifications = true\n", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := writeFile(t, path, tt.toml); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			got, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got.NotifyEnabled() != tt.want {
+				t.Errorf("NotifyEnabled() = %v, want %v", got.NotifyEnabled(), tt.want)
+			}
+		})
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	tests := []struct {
 		name    string

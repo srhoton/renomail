@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -107,6 +108,20 @@ func setReadCmd(st *store.Store, id string, read bool) tea.Cmd {
 	return func() tea.Msg {
 		err := st.SetRead(context.Background(), id, read)
 		return readToggledMsg{id: id, read: read, err: err}
+	}
+}
+
+// notifyCmd pushes a "new items" host notification off the UI goroutine for one
+// source's fresh arrivals. fn is the model's injected notifier (a no-op unless we
+// are inside tmux); a notifier failure surfaces as an errMsg on the status line
+// rather than crashing, mirroring openInBrowser. On success it yields a nil msg.
+func notifyCmd(fn func(string) error, srcName string, n int) tea.Cmd {
+	return func() tea.Msg {
+		msg := fmt.Sprintf("renomail: %d new from %s", n, srcName)
+		if err := fn(msg); err != nil {
+			return errMsg{err}
+		}
+		return nil
 	}
 }
 

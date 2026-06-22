@@ -66,6 +66,7 @@ type Model struct {
 	// actions (step 08)
 	openURL     func(string) error // opens an item's permalink; injectable for tests (default browser.OpenURL)
 	triggerSync func()             // requests an out-of-band engine sweep; nil ⇒ no-op
+	notify      func(string) error // pushes a host notification (tmux) on new items; default no-op
 
 	// background sync
 	events    <-chan syncengine.Result   // engine results, drained by waitForActivity
@@ -124,6 +125,10 @@ func New(
 		sources:     len(providers),
 		openURL:     browser.OpenURL,
 		triggerSync: triggerSync,
+		// Default to a no-op; the cmd layer swaps in notify.Tmux only when running
+		// inside tmux with notifications enabled, keeping this package free of any
+		// environment/process concerns.
+		notify: func(string) error { return nil },
 		// The engine runs an immediate first sweep emitting one result per
 		// provider; seed inflight with that count so the spinner runs until the
 		// initial sweep completes. With no providers there is nothing to wait for.
@@ -132,6 +137,16 @@ func New(
 	}
 	m.refreshHelp()
 	return m, nil
+}
+
+// SetNotifier installs the host-notification function invoked when new items
+// arrive during a steady-state sync (e.g. notify.Tmux). The cmd layer wires it
+// only when running inside a supported multiplexer with notifications enabled; a
+// nil argument is ignored so the model keeps its no-op default.
+func (m *Model) SetNotifier(fn func(string) error) {
+	if fn != nil {
+		m.notify = fn
+	}
 }
 
 // refreshHelp recomputes the cached help line. It is called only when the inputs
@@ -277,6 +292,12 @@ func (m Model) handleSyncBatch(msg syncBatchMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, loadItemsCmd(m.store, m.filter))
 	case !initialSweep && len(r.Items) > 0:
 		cmds = append(cmds, loadItemsCmd(m.store, m.filter))
+	}
+	// Notify on genuinely new items arriving in steady state. The initial sweep is
+	// suppressed (on first launch everything looks new, and the user is already
+	// looking at the app); m.notify is a no-op unless we are running inside tmux.
+	if !initialSweep && r.Inserted > 0 {
+		cmds = append(cmds, notifyCmd(m.notify, r.SourceName, r.Inserted))
 	}
 	return m, tea.Batch(cmds...)
 }

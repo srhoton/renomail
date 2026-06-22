@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func TestQuery_ordersByPublishedDescending(t *testing.T) {
 		newItem("c", "s1", model.KindRSS, 300),
 		newItem("b", "s1", model.KindRSS, 200),
 	}
-	if err := s.UpsertItems(ctx, items); err != nil {
+	if _, err := s.UpsertItems(ctx, items); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 
@@ -85,7 +86,7 @@ func TestQuery_roundTripsAllFields(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	in := newItem("x", "s1", model.KindEmail, 500)
-	if err := s.UpsertItems(ctx, []model.Item{in}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{in}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 	got, err := s.Query(ctx, model.Filter{})
@@ -118,7 +119,7 @@ func TestUpsertItems_preservesReadOnReFetch(t *testing.T) {
 	ctx := context.Background()
 
 	orig := newItem("a", "s1", model.KindRSS, 100)
-	if err := s.UpsertItems(ctx, []model.Item{orig}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{orig}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 	if err := s.SetRead(ctx, "a", true); err != nil {
@@ -131,7 +132,7 @@ func TestUpsertItems_preservesReadOnReFetch(t *testing.T) {
 	refetched.Title = "updated title"
 	refetched.Snippet = "updated snippet"
 	refetched.Read = false
-	if err := s.UpsertItems(ctx, []model.Item{refetched}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{refetched}); err != nil {
 		t.Fatalf("re-UpsertItems: %v", err)
 	}
 
@@ -155,14 +156,14 @@ func TestUpsertItems_emptyBodyDoesNotClobber(t *testing.T) {
 	ctx := context.Background()
 
 	full := newItem("a", "s1", model.KindRSS, 100)
-	if err := s.UpsertItems(ctx, []model.Item{full}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{full}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 
 	stub := newItem("a", "s1", model.KindRSS, 100)
 	stub.BodyHTML = ""
 	stub.BodyText = ""
-	if err := s.UpsertItems(ctx, []model.Item{stub}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{stub}); err != nil {
 		t.Fatalf("re-UpsertItems: %v", err)
 	}
 
@@ -184,12 +185,12 @@ func TestQuery_filterDimensions(t *testing.T) {
 		newItem("rss2", "feedB", model.KindRSS, 200),
 		newItem("mail1", "acct", model.KindEmail, 300),
 	}
-	if err := s.UpsertItems(ctx, seed); err != nil {
+	if _, err := s.UpsertItems(ctx, seed); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 	// "mail1" title carries a searchable token.
 	seed[2].Title = "quarterly report"
-	if err := s.UpsertItems(ctx, []model.Item{seed[2]}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{seed[2]}); err != nil {
 		t.Fatalf("UpsertItems update: %v", err)
 	}
 	if err := s.SetRead(ctx, "rss1", true); err != nil {
@@ -285,7 +286,7 @@ func TestSetRead_togglesBothDirections(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertItems(ctx, []model.Item{newItem("a", "s1", model.KindRSS, 100)}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{newItem("a", "s1", model.KindRSS, 100)}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 
@@ -318,7 +319,7 @@ func TestQuery_searchEscapesWildcards(t *testing.T) {
 	literal.Title = "discount 50% off"
 	other := newItem("oth", "s1", model.KindRSS, 100)
 	other.Title = "plain title"
-	if err := s.UpsertItems(ctx, []model.Item{literal, other}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{literal, other}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 
@@ -350,7 +351,7 @@ func TestMarkAllRead_onlyAffectsMatchingSubset(t *testing.T) {
 		newItem("rss2", "feedA", model.KindRSS, 200),
 		newItem("mail1", "acct", model.KindEmail, 300),
 	}
-	if err := s.UpsertItems(ctx, seed); err != nil {
+	if _, err := s.UpsertItems(ctx, seed); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 
@@ -377,7 +378,7 @@ func TestMarkAllRead_scopedBySourceID(t *testing.T) {
 		newItem("a2", "feedA", model.KindRSS, 200),
 		newItem("b1", "feedB", model.KindRSS, 300),
 	}
-	if err := s.UpsertItems(ctx, seed); err != nil {
+	if _, err := s.UpsertItems(ctx, seed); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 
@@ -409,7 +410,7 @@ func TestSetGetBody_roundTrip(t *testing.T) {
 
 	it := newItem("a", "s1", model.KindRSS, 100)
 	it.BodyHTML, it.BodyText = "", ""
-	if err := s.UpsertItems(ctx, []model.Item{it}); err != nil {
+	if _, err := s.UpsertItems(ctx, []model.Item{it}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 	if err := s.SetBody(ctx, "a", "<h1>hi</h1>", "hi"); err != nil {
@@ -530,8 +531,122 @@ func TestUpsertSources_batchAndEmptyNoop(t *testing.T) {
 
 func TestUpsertItems_emptySliceNoop(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.UpsertItems(context.Background(), nil); err != nil {
+	n, err := s.UpsertItems(context.Background(), nil)
+	if err != nil {
 		t.Errorf("UpsertItems(nil) = %v, want nil", err)
+	}
+	if n != 0 {
+		t.Errorf("UpsertItems(nil) inserted = %d, want 0", n)
+	}
+}
+
+func TestUpsertItems_reportsInsertedCount(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// First batch: every id is new, so all are counted as inserted.
+	first := []model.Item{
+		newItem("a", "s1", model.KindRSS, 100),
+		newItem("b", "s1", model.KindRSS, 200),
+		newItem("c", "s1", model.KindRSS, 300),
+	}
+	if n, err := s.UpsertItems(ctx, first); err != nil {
+		t.Fatalf("UpsertItems(first): %v", err)
+	} else if n != 3 {
+		t.Errorf("first inserted = %d, want 3", n)
+	}
+
+	// Re-upsert the same ids: none are new, so the count is 0 even though the
+	// rows are updated in place.
+	for i := range first {
+		first[i].Title = "refreshed " + first[i].ID
+	}
+	if n, err := s.UpsertItems(ctx, first); err != nil {
+		t.Fatalf("UpsertItems(re-seen): %v", err)
+	} else if n != 0 {
+		t.Errorf("re-seen inserted = %d, want 0", n)
+	}
+
+	// Mixed batch: two known ids plus one new id counts exactly one insert.
+	mixed := []model.Item{
+		newItem("a", "s1", model.KindRSS, 100), // existing
+		newItem("c", "s1", model.KindRSS, 300), // existing
+		newItem("d", "s1", model.KindRSS, 400), // new
+	}
+	if n, err := s.UpsertItems(ctx, mixed); err != nil {
+		t.Fatalf("UpsertItems(mixed): %v", err)
+	} else if n != 1 {
+		t.Errorf("mixed inserted = %d, want 1", n)
+	}
+
+	// The content refresh from the re-seen batch must still have landed.
+	got, err := s.Query(ctx, model.Filter{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("row count = %d, want 4", len(got))
+	}
+}
+
+func TestUpsertItems_countDedupesRepeatedIDsInBatch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// A batch carrying the same id twice (e.g. two RSS entries that collapse to the
+	// same StableID) inserts a single row, so the inserted count must be 1, not 2.
+	dup := newItem("a", "s1", model.KindRSS, 100)
+	batch := []model.Item{dup, newItem("a", "s1", model.KindRSS, 100)}
+	if n, err := s.UpsertItems(ctx, batch); err != nil {
+		t.Fatalf("UpsertItems(dup): %v", err)
+	} else if n != 1 {
+		t.Errorf("inserted = %d, want 1 (the repeated id counts once)", n)
+	}
+
+	// Exactly one row landed.
+	got, err := s.Query(ctx, model.Filter{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("row count = %d, want 1", len(got))
+	}
+
+	// A mixed batch: one new id repeated, plus the now-existing id — one genuine insert.
+	mixed := []model.Item{
+		newItem("b", "s1", model.KindRSS, 200),
+		newItem("b", "s1", model.KindRSS, 200), // duplicate of the new id
+		newItem("a", "s1", model.KindRSS, 100), // already stored
+	}
+	if n, err := s.UpsertItems(ctx, mixed); err != nil {
+		t.Fatalf("UpsertItems(mixed dup): %v", err)
+	} else if n != 1 {
+		t.Errorf("mixed inserted = %d, want 1", n)
+	}
+}
+
+func TestUpsertItems_countSpansChunkBoundary(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// More than one existence-check chunk (500) of brand-new ids: the per-chunk
+	// counts must sum to the full insert total.
+	const total = 1200
+	batch := make([]model.Item, total)
+	for i := range batch {
+		batch[i] = newItem("item-"+strconv.Itoa(i), "s1", model.KindRSS, int64(i))
+	}
+	if n, err := s.UpsertItems(ctx, batch); err != nil {
+		t.Fatalf("UpsertItems(large): %v", err)
+	} else if n != total {
+		t.Errorf("inserted = %d, want %d", n, total)
+	}
+
+	// Re-upsert the same large batch: zero new across every chunk.
+	if n, err := s.UpsertItems(ctx, batch); err != nil {
+		t.Fatalf("UpsertItems(large re-seen): %v", err)
+	} else if n != 0 {
+		t.Errorf("re-seen large inserted = %d, want 0", n)
 	}
 }
 
