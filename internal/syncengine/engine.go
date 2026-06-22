@@ -24,12 +24,15 @@ import (
 const defaultMaxConc = 8
 
 // Result is one provider's outcome for one sweep. Items is what Fetch returned
-// (already upserted by the engine); Err is non-nil when the fetch or upsert
-// failed, in which case Items is best-effort and usually empty.
+// (already upserted by the engine); Inserted is how many of those rows were
+// genuinely new (not re-seen updates), which the UI uses to notify on fresh
+// arrivals; Err is non-nil when the fetch or upsert failed, in which case Items is
+// best-effort and usually empty (and Inserted is 0).
 type Result struct {
 	SourceID   string
 	SourceName string
 	Items      []model.Item
+	Inserted   int
 	Err        error
 }
 
@@ -123,10 +126,13 @@ func (e *Engine) syncAll(ctx context.Context) {
 			// alongside an error (e.g. Gmail harvesting the messages it did fetch
 			// before one Get failed); those items are still valid and must not be
 			// dropped.
+			var inserted int
 			if len(items) > 0 {
-				if uerr := e.store.UpsertItems(ctx, items); uerr != nil && err == nil {
+				n, uerr := e.store.UpsertItems(ctx, items)
+				if uerr != nil && err == nil {
 					err = uerr
 				}
+				inserted = n
 			}
 			if err == nil {
 				st := source.StateOf(p, now)
@@ -135,7 +141,7 @@ func (e *Engine) syncAll(ctx context.Context) {
 				mu.Unlock()
 			}
 			select {
-			case e.out <- Result{SourceID: p.ID(), SourceName: p.Name(), Items: items, Err: err}:
+			case e.out <- Result{SourceID: p.ID(), SourceName: p.Name(), Items: items, Inserted: inserted, Err: err}:
 			case <-ctx.Done():
 				// The consumer is going away; deliberately discard this Result
 				// rather than block. Run will close the channel next.

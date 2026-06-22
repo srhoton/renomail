@@ -7,10 +7,11 @@ individual keys fall back to their defaults.
 
 ## Top-level keys
 
-| Key             | Type   | Default | Description                                                        |
-| --------------- | ------ | ------- | ------------------------------------------------------------------ |
-| `sync_interval` | string | `"5m"`  | How often the background engine re-syncs every source.             |
-| `lookback`      | string | `"30d"` | How far back the **first** Gmail sweep looks (the cold-start window). |
+| Key                  | Type   | Default | Description                                                        |
+| -------------------- | ------ | ------- | ------------------------------------------------------------------ |
+| `sync_interval`      | string | `"5m"`  | How often the background engine re-syncs every source.             |
+| `lookback`           | string | `"30d"` | How far back the **first** Gmail sweep looks (the cold-start window). |
+| `tmux_notifications` | bool   | `true`  | When running inside tmux, post a status-line message as new items arrive. Set `false` to disable. Has no effect outside tmux. |
 
 After the first sync each source advances its own `LastSync`, so steady-state
 syncs only fetch what is new; `lookback` bounds only that initial scan.
@@ -85,8 +86,9 @@ title = "Example Blog"
 ## Complete example
 
 ```toml
-sync_interval = "10m"
-lookback      = "14d"
+sync_interval      = "10m"
+lookback           = "14d"
+tmux_notifications = true
 
 [[gmail]]
 account = "me@gmail.com"

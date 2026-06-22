@@ -92,6 +92,21 @@ go build ./cmd/renomail    # produces ./renomail
 | `?`            | toggle full help                                  |
 | `q` / `Ctrl+C` | quit                                              |
 
+## Notifications
+
+When renomail runs inside a **tmux** session, it posts a brief message to the tmux
+status line each time a background sync pulls in new items — e.g.
+`renomail: 3 new from Hacker News` — so you get a heads-up without switching back to
+its window. One message is sent per source that gained items; the initial sweep on
+launch is not announced. Outside tmux nothing is emitted.
+
+This is on by default whenever `$TMUX` is set. To turn it off, add to your
+`config.toml`:
+
+```toml
+tmux_notifications = false
+```
+
 ## Subcommands
 
 | Command                      | Purpose                                                   |

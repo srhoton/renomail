@@ -60,7 +60,7 @@ func dumpFeeds(ctx context.Context, out, errOut io.Writer, st *store.Store, prov
 		if items == nil {
 			fmt.Fprintf(errOut, "info: %s: not modified\n", p.Name())
 		}
-		if err := st.UpsertItems(ctx, items); err != nil {
+		if _, err := st.UpsertItems(ctx, items); err != nil {
 			return fmt.Errorf("upsert %s: %w", p.Name(), err)
 		}
 		if err := st.UpsertSource(ctx, source.StateOf(p, now)); err != nil {

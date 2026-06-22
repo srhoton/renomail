@@ -29,6 +29,12 @@ type Config struct {
 	Gmail        []GmailAccount `toml:"gmail"`
 	OPML         []OPMLSource   `toml:"opml"`
 	Feed         []FeedSource   `toml:"feed"` // one-off feeds without OPML
+
+	// TmuxNotifications opts out of the tmux status-line notification fired when
+	// new items arrive during a background sync (active only when running inside
+	// tmux). It is a pointer so an absent key (default = enabled) is distinct from
+	// an explicit `tmux_notifications = false`.
+	TmuxNotifications *bool `toml:"tmux_notifications"`
 }
 
 // GmailAccount identifies a Gmail account to pull. The address doubles as the
@@ -121,6 +127,13 @@ func (c Config) SyncEvery() (time.Duration, error) {
 // repeatedly on a hot path.
 func (c Config) LookbackDuration() (time.Duration, error) {
 	return parseDurationDefault(c.Lookback, defaultLookback)
+}
+
+// NotifyEnabled reports whether tmux notifications are on. They default to on;
+// only an explicit `tmux_notifications = false` in the config disables them. The
+// caller still gates on actually running inside tmux ($TMUX set).
+func (c Config) NotifyEnabled() bool {
+	return c.TmuxNotifications == nil || *c.TmuxNotifications
 }
 
 // parseDurationDefault parses s, substituting def when s is empty.

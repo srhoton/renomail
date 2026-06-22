@@ -78,7 +78,7 @@ func seedItems() []model.Item {
 func newSeededModel(t *testing.T) (Model, *store.Store) {
 	t.Helper()
 	st := newSeededStore(t)
-	if err := st.UpsertItems(context.Background(), seedItems()); err != nil {
+	if _, err := st.UpsertItems(context.Background(), seedItems()); err != nil {
 		t.Fatalf("UpsertItems() error = %v", err)
 	}
 	m, err := New(st, nil, nil, nil, nil)
@@ -276,7 +276,7 @@ func TestLoadBodyCmd_emptyStoredBody_fallsBackToProvider(t *testing.T) {
 		ID: "mail1", Kind: model.KindEmail, SourceID: "gmail:me", SourceName: "me",
 		Title: "Mail", NativeID: "n1", Published: time.Now(),
 	}
-	if err := st.UpsertItems(ctx, []model.Item{bodyless}); err != nil {
+	if _, err := st.UpsertItems(ctx, []model.Item{bodyless}); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 	r := mustRenderer(t)
@@ -351,6 +351,157 @@ func TestUpdate_syncBatch_initialSweepStopsSpinner(t *testing.T) {
 	if m.syncing || m.inflight != 0 {
 		t.Errorf("after the only provider reported: syncing=%v inflight=%d, want false/0", m.syncing, m.inflight)
 	}
+}
+
+// steadyStateModel returns a seeded model whose events channel is already closed,
+// so the re-armed waitForActivity listener returns immediately (nil) rather than
+// blocking when a test executes the commands batched by handleSyncBatch. With no
+// providers, inflight is 0, so a sync batch is treated as steady-state.
+func steadyStateModel(t *testing.T) Model {
+	t.Helper()
+	st := newSeededStore(t)
+	if _, err := st.UpsertItems(context.Background(), seedItems()); err != nil {
+		t.Fatalf("UpsertItems() error = %v", err)
+	}
+	ch := make(chan syncengine.Result)
+	close(ch)
+	m, err := New(st, ch, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return m
+}
+
+func TestUpdate_syncBatch_steadyState_notifiesPerSource(t *testing.T) {
+	m := steadyStateModel(t)
+	var got string
+	m.notify = func(msg string) error { got = msg; return nil }
+
+	res := syncengine.Result{SourceID: "a", SourceName: "Feed A", Items: seedItems(), Inserted: 3}
+	_, cmd := step(t, m, syncBatchMsg{res})
+	if cmd == nil {
+		t.Fatal("syncBatchMsg returned nil cmd")
+	}
+	// Run the batched commands to fire the notifier; the re-query and the (closed)
+	// listener are harmless to execute here.
+	runCmdMsgs(t, cmd())
+
+	if want := "renomail: 3 new from Feed A"; got != want {
+		t.Errorf("notification = %q, want %q", got, want)
+	}
+}
+
+func TestUpdate_syncBatch_initialSweep_doesNotNotify(t *testing.T) {
+	st := newSeededStore(t)
+	prov := stubProvider{id: "gmail:me", body: "x"}
+	ch := make(chan syncengine.Result)
+	close(ch) // re-armed listener returns immediately instead of blocking
+	m, err := New(st, ch, []source.Provider{prov}, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Precondition: the initial sweep is in flight (inflight == 1).
+	if !m.syncing || m.inflight != 1 {
+		t.Fatalf("precondition syncing=%v inflight=%d, want true/1", m.syncing, m.inflight)
+	}
+	called := false
+	m.notify = func(string) error { called = true; return nil }
+
+	// Even with new items, an initial-sweep batch must not notify.
+	res := syncengine.Result{SourceID: "gmail:me", SourceName: "me", Inserted: 5}
+	_, cmd := step(t, m, syncBatchMsg{res})
+	runCmdMsgs(t, cmd())
+
+	if called {
+		t.Error("notifier fired during the initial sweep, want it suppressed")
+	}
+}
+
+func TestUpdate_syncBatch_noNewItems_doesNotNotify(t *testing.T) {
+	m := steadyStateModel(t)
+	called := false
+	m.notify = func(string) error { called = true; return nil }
+
+	// Items re-seen but nothing inserted (Inserted == 0): no notification.
+	res := syncengine.Result{SourceID: "a", SourceName: "Feed A", Items: seedItems(), Inserted: 0}
+	_, cmd := step(t, m, syncBatchMsg{res})
+	runCmdMsgs(t, cmd())
+
+	if called {
+		t.Error("notifier fired with zero inserted items, want it suppressed")
+	}
+}
+
+func TestUpdate_syncBatch_notifyError_surfacesOnStatus(t *testing.T) {
+	m := steadyStateModel(t)
+	m.notify = func(string) error { return errors.New("no tmux server") }
+
+	res := syncengine.Result{SourceID: "a", SourceName: "Feed A", Inserted: 1}
+	_, cmd := step(t, m, syncBatchMsg{res})
+
+	// The notifier error rides back as an errMsg; feeding it to the model surfaces
+	// it on the status line (mirrors the open-in-browser error path).
+	if msg := findErrMsg(cmd); msg != nil {
+		nm, _ := step(t, m, *msg)
+		if !strings.Contains(nm.status, "no tmux server") {
+			t.Errorf("status = %q, want the notifier error surfaced", nm.status)
+		}
+	} else {
+		t.Fatal("no errMsg produced by the failing notifier")
+	}
+}
+
+func TestNew_defaultNotifierIsNoop(t *testing.T) {
+	m, _ := newSeededModel(t)
+	if m.notify == nil {
+		t.Fatal("default notify is nil, want a no-op function")
+	}
+	if err := m.notify("anything"); err != nil {
+		t.Errorf("default notify returned %v, want nil (no-op)", err)
+	}
+}
+
+// runCmdMsgs recursively executes a (possibly batched) command's messages so any
+// injected side effects (the notifier, store re-query) run. Non-batch messages are
+// discarded. Tests using it must supply a model whose events channel is closed, so
+// the re-armed waitForActivity listener returns immediately rather than blocking.
+func runCmdMsgs(t *testing.T, msg tea.Msg) {
+	t.Helper()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, c := range batch {
+		if c != nil {
+			runCmdMsgs(t, c())
+		}
+	}
+}
+
+// findErrMsg walks a batched command tree and returns the first errMsg produced,
+// or nil if none. Used to assert the notifier's failure path.
+func findErrMsg(cmd tea.Cmd) *errMsg {
+	var out *errMsg
+	var walk func(tea.Msg)
+	walk = func(msg tea.Msg) {
+		switch m := msg.(type) {
+		case errMsg:
+			if out == nil {
+				em := m
+				out = &em
+			}
+		case tea.BatchMsg:
+			for _, c := range m {
+				if c != nil {
+					walk(c())
+				}
+			}
+		}
+	}
+	if cmd != nil {
+		walk(cmd())
+	}
+	return out
 }
 
 func TestUpdate_openInBrowser_feedAndReader(t *testing.T) {
@@ -500,7 +651,7 @@ func TestHandleFeedKey_markSourceRead_marksOnlySelectedSource(t *testing.T) {
 		{ID: "a2", Kind: model.KindRSS, SourceID: "feed:a", SourceName: "Feed A", Title: "A Two", Published: now.Add(-2 * time.Minute)},
 		{ID: "b1", Kind: model.KindRSS, SourceID: "feed:b", SourceName: "Feed B", Title: "B One", Published: now.Add(-3 * time.Minute)},
 	}
-	if err := st.UpsertItems(context.Background(), items); err != nil {
+	if _, err := st.UpsertItems(context.Background(), items); err != nil {
 		t.Fatalf("UpsertItems: %v", err)
 	}
 	m, err := New(st, nil, nil, nil, nil)
@@ -950,7 +1101,7 @@ func TestReadState_survivesReupsert(t *testing.T) {
 	}
 	// A subsequent re-sync (UpsertItems with the original unread flags) must not
 	// clobber the local read state — the step-02 guard, re-asserted at the UI level.
-	if err := st.UpsertItems(context.Background(), seedItems()); err != nil {
+	if _, err := st.UpsertItems(context.Background(), seedItems()); err != nil {
 		t.Fatalf("UpsertItems() error = %v", err)
 	}
 	items, err := st.Query(context.Background(), model.Filter{})
