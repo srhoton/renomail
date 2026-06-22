@@ -39,6 +39,9 @@ type KeyMap struct {
 	// Actions (step 08).
 	OpenBrowser key.Binding // "o"  open the current item's permalink in the browser
 	ForceSync   key.Binding // "R"  request an immediate sync sweep
+
+	// Bulk read-state by source.
+	MarkSourceRead key.Binding // "S"  mark every item from the selected source read
 }
 
 // Default returns the standard key bindings: vi-style motion, open/back/help/quit,
@@ -65,6 +68,8 @@ func Default() KeyMap {
 
 		OpenBrowser: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
 		ForceSync:   key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "sync now")),
+
+		MarkSourceRead: key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "mark source read")),
 	}
 }
 
@@ -80,7 +85,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.Top, k.Bottom},
 		{k.Open, k.Back, k.OpenBrowser},
 		{k.Search, k.FilterEmail, k.FilterRSS, k.FilterUnread, k.FilterAll},
-		{k.ToggleRead, k.MarkAllRead, k.ForceSync},
+		{k.ToggleRead, k.MarkAllRead, k.MarkSourceRead, k.ForceSync},
 		{k.Help, k.Quit},
 	}
 }
