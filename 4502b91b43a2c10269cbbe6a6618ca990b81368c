@@ -1,0 +1,31 @@
+Session prompts that produced this change (verbatim user messages):
+
+1. "Ok, that's merged. Next thing I would like to add is this: while scrolling,
+   highlight the line I'm on (in addition to the '>' symbol, so I know where I'm
+   at. Can you plan that out?"
+
+   (Plan-mode AskUserQuestion answer:
+    - Highlight style: "Background bar" — a subtle, theme-aware full-width
+      background fill on the selected line, preserving bold/faint text emphasis.)
+
+2. "/review" — ran the four-reviewer pass (functional, code-quality,
+   adr-compliance, performance) on the working-tree changes.
+
+   Review found and I fixed:
+   - CRITICAL: on a narrow terminal the selected row wrapped to two visual lines
+     because style.Width(m.Width()) word-wrapped content that exceeded the width
+     (the title budget clamps to minTitleCols) and the delegate is Height()==1,
+     desyncing the list's row accounting. Fixed by capping the assembled line to
+     the viewport width with runewidth.Truncate before rendering (guarded w>0),
+     then padding only the selected row's bar with .Width. Added a narrow-width
+     regression test.
+   - MEDIUM: documented why the 252/238 selection colors were chosen.
+   - MEDIUM: documented the unsetBackground sentinel's comparability assumption.
+   - LOW: renamed a width int that shadowed the io.Writer parameter.
+   Re-review verdicts after fixes: functional APPROVED, code-quality PASS,
+   adr-compliance N/A (catalog is cloud/Lambda/React-scoped), performance PASS.
+
+3. "/trueup" — "ok. Please commit your work, add prompts in this session to the
+   commit via git notes, push it, and using your github cli tool, create a PR.
+   Make sure the README for the PR accurately describes the changes made from a
+   full diff from the branch you are merging into."
