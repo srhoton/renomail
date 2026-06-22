@@ -1,0 +1,38 @@
+Session prompts that produced this commit
+==========================================
+
+This change was developed on a clean branch off main (feat/hide-read-cycle). In the
+same session, a separate recovery PR (#11) was opened to bring the stranded `S`
+"mark source read" feature into main; this commit is independent of that.
+
+[1] Ok. Can you plan out functionality that 'hides' all read items in the UI?
+    (plan mode) -- Explore agents found the data layer already supported it:
+    model.ReadState has three values (ReadAny / ReadUnreadOnly / ReadReadOnly) and
+    store.buildWhere already maps them to read=0 / read=1 / no predicate, and the
+    status-bar filterHint already renders "unread"/"read". The only gap was UI
+    exposure: `u` set unread-only one-way and `a` (which also clears every other
+    filter) was the only way back; ReadReadOnly was unreachable.
+
+[2] AskUserQuestion -- Interaction: "Three-state cycle" (one key cycles
+    all -> unread-only -> read-only -> all, exposing the unused read-only state),
+    over a dedicated toggle key or repurposing `u` as a two-state toggle.
+    Persistence: "Session-only" (resets each launch, like every other filter).
+
+[3] (ExitPlanMode) plan approved.
+
+[4] /review -- four-reviewer pass on the changes. functional APPROVED, quality PASS,
+    ADR N/A (0 of 13 ADRs apply to a standalone Go TUI), performance PASS. Zero
+    CRITICAL/HIGH findings; four LOW (two test-style nits, two scale optimizations).
+
+[5] address all 4.
+    1+2. Merged the two near-identical readToggled re-query tests into one
+         table-driven test that also asserts the *correct* row is dropped.
+    3.   readToggledMsg now drops the row in place via a new feed.RemoveLocal
+         instead of a full re-query; added feed RemoveLocal unit tests.
+    4.   store schema: dropped redundant idx_items_read, added composite
+         idx_items_read_published (read, published DESC).
+    Re-review (iteration 2): functional APPROVED, performance PASS, quality PASS
+    with one new LOW (index comment overstated the benefit re: the id tie-break) --
+    tightened the comment. Final gate green.
+
+[6] /trueup -- commit, git note, push, open PR describing the full base diff.
