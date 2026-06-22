@@ -95,6 +95,32 @@ func TestModel_setReadLocal_unknownIDIsNoOp(t *testing.T) {
 	}
 }
 
+func TestModel_removeLocal_dropsAddressedRow(t *testing.T) {
+	m := newSized()
+	m.SetItems(testItems())
+
+	m.RemoveLocal("a") // drop the unread item
+
+	items := m.list.Items()
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d after RemoveLocal, want 1", len(items))
+	}
+	if got := items[0].(row).item.ID; got != "b" {
+		t.Errorf("remaining item id = %q, want %q", got, "b")
+	}
+}
+
+func TestModel_removeLocal_unknownIDIsNoOp(t *testing.T) {
+	m := newSized()
+	m.SetItems(testItems())
+
+	m.RemoveLocal("does-not-exist") // must not panic or drop a row
+
+	if got := len(m.list.Items()); got != 2 {
+		t.Errorf("len(items) = %d after RemoveLocal on unknown id, want 2", got)
+	}
+}
+
 func TestView_rendersRowsWithDots(t *testing.T) {
 	m := newSized()
 	m.SetItems(testItems())

@@ -86,7 +86,8 @@ go build ./cmd/renomail    # produces ./renomail
 | `S`            | mark every item from the selected source read     |
 | `/`            | search (substring over title, sender, and body)   |
 | `e` / `r`      | show email only / RSS only                        |
-| `u` / `a`      | show unread only / reset all filters              |
+| `u`            | cycle read filter: all → unread only → read only  |
+| `a`            | reset all filters                                 |
 | `R`            | sync now (force an immediate sweep)               |
 | `?`            | toggle full help                                  |
 | `q` / `Ctrl+C` | quit                                              |

@@ -214,11 +214,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = msg.err.Error()
 			return m, nil
 		}
-		// Under an unread-only filter a now-read item must leave the list, so
-		// re-query; otherwise confirm the flag in place (a no-op when the caller
+		// When a read-state filter is active, a toggle that moves the item out of
+		// the filtered set must remove it from the list; drop just that row in
+		// place rather than re-querying the whole feed (only this one item
+		// changed). Otherwise confirm the flag in place (a no-op when the caller
 		// already flipped it optimistically).
-		if msg.read && m.filter.Read == model.ReadUnreadOnly {
-			return m, loadItemsCmd(m.store, m.filter)
+		leaves := (m.filter.Read == model.ReadUnreadOnly && msg.read) ||
+			(m.filter.Read == model.ReadReadOnly && !msg.read)
+		if leaves {
+			m.feed.RemoveLocal(msg.id)
+			return m, nil
 		}
 		m.feed.SetReadLocal(msg.id, msg.read)
 		return m, nil
@@ -379,8 +384,8 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.FilterRSS):
 		m.filter.Kinds = map[model.Kind]bool{model.KindRSS: true}
 		return m, m.applyFilter()
-	case key.Matches(msg, m.keys.FilterUnread):
-		m.filter.Read = model.ReadUnreadOnly
+	case key.Matches(msg, m.keys.CycleRead):
+		m.filter.Read = m.filter.Read.Next()
 		return m, m.applyFilter()
 	case key.Matches(msg, m.keys.FilterAll):
 		m.filter = model.Filter{}

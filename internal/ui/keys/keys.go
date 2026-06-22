@@ -1,7 +1,7 @@
 // Package keys defines the application key bindings and the help.KeyMap that
 // drives the on-screen help line (DESIGN.md §6.7). Step 04 wired the navigation,
 // open/back, help, and quit keys; step 05 added search, the quick filters, and the
-// read-state toggles; step 08 adds open-in-browser ("o") and force-sync ("R").
+// read-state controls; step 08 adds open-in-browser ("o") and force-sync ("R").
 package keys
 
 import "charm.land/bubbles/v2/key"
@@ -28,13 +28,13 @@ type KeyMap struct {
 	Help      key.Binding
 
 	// Filtering and read-state (step 05).
-	Search       key.Binding // "/"  open the search bar
-	FilterEmail  key.Binding // "e"  scope to email
-	FilterRSS    key.Binding // "r"  scope to rss
-	FilterUnread key.Binding // "u"  show unread only
-	FilterAll    key.Binding // "a"  reset every filter
-	ToggleRead   key.Binding // "m"  toggle the selected item's read flag
-	MarkAllRead  key.Binding // "M"  mark every matching item read
+	Search      key.Binding // "/"  open the search bar
+	FilterEmail key.Binding // "e"  scope to email
+	FilterRSS   key.Binding // "r"  scope to rss
+	CycleRead   key.Binding // "u"  cycle read filter: all -> unread -> read
+	FilterAll   key.Binding // "a"  reset every filter
+	ToggleRead  key.Binding // "m"  toggle the selected item's read flag
+	MarkAllRead key.Binding // "M"  mark every matching item read
 
 	// Actions (step 08).
 	OpenBrowser key.Binding // "o"  open the current item's permalink in the browser
@@ -58,13 +58,13 @@ func Default() KeyMap {
 		ForceQuit: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 
-		Search:       key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
-		FilterEmail:  key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "email")),
-		FilterRSS:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rss")),
-		FilterUnread: key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unread")),
-		FilterAll:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
-		ToggleRead:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle read")),
-		MarkAllRead:  key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "mark all read")),
+		Search:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+		FilterEmail: key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "email")),
+		FilterRSS:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rss")),
+		CycleRead:   key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "read filter")),
+		FilterAll:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "all")),
+		ToggleRead:  key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle read")),
+		MarkAllRead: key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "mark all read")),
 
 		OpenBrowser: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
 		ForceSync:   key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "sync now")),
@@ -84,7 +84,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Top, k.Bottom},
 		{k.Open, k.Back, k.OpenBrowser},
-		{k.Search, k.FilterEmail, k.FilterRSS, k.FilterUnread, k.FilterAll},
+		{k.Search, k.FilterEmail, k.FilterRSS, k.CycleRead, k.FilterAll},
 		{k.ToggleRead, k.MarkAllRead, k.MarkSourceRead, k.ForceSync},
 		{k.Help, k.Quit},
 	}

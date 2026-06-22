@@ -163,6 +163,22 @@ func (m *Model) SetReadLocal(id string, read bool) {
 	}
 }
 
+// RemoveLocal drops the row with the given id from the list in place, so an item
+// that has left the active read filter (e.g. marked read under an unread-only
+// filter) disappears immediately without re-querying the whole feed. It addresses
+// the row by id for the same stale-safe reason as SetReadLocal; unknown ids are a
+// no-op.
+func (m *Model) RemoveLocal(id string) {
+	for i, li := range m.list.Items() {
+		r, ok := li.(row)
+		if !ok || r.item.ID != id {
+			continue
+		}
+		m.list.RemoveItem(i)
+		return
+	}
+}
+
 // Update forwards messages (motion keys, resize) to the embedded list.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
