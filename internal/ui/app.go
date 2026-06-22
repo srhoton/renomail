@@ -400,6 +400,21 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, setReadCmd(m.store, it.ID, next)
 	case key.Matches(msg, m.keys.MarkAllRead):
 		return m, markAllReadCmd(m.store, m.filter)
+	case key.Matches(msg, m.keys.MarkSourceRead):
+		it, ok := m.feed.Selected()
+		if !ok || it.SourceID == "" {
+			return m, nil
+		}
+		// Mark the whole source read regardless of the active filter: a fresh
+		// source-only filter, not m.filter. The reload (reloadMsg) then re-queries
+		// with the current filter, so the source's rows dim — or drop, under an
+		// unread-only filter.
+		//
+		// Set a transient confirmation: with no filter active the only visible effect
+		// is the rows dimming. handleKey already cleared the prior status before
+		// dispatch, so this survives until the next keypress.
+		m.status = "marked " + sourceLabel(it) + " read"
+		return m, markAllReadCmd(m.store, model.Filter{SourceIDs: map[string]bool{it.SourceID: true}})
 	case key.Matches(msg, m.keys.Open):
 		it, ok := m.feed.Selected()
 		if !ok {
@@ -578,4 +593,14 @@ func filterHint(f model.Filter) string {
 		parts = append(parts, `"`+f.Search+`"`)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// sourceLabel is the user-facing name for an item's source, used in the
+// mark-source-read confirmation. It prefers the display name and falls back to the
+// stable source id when the name is empty.
+func sourceLabel(it model.Item) string {
+	if it.SourceName != "" {
+		return it.SourceName
+	}
+	return it.SourceID
 }

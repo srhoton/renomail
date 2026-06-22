@@ -492,6 +492,101 @@ func TestUpdate_keyClearsTransientStatus(t *testing.T) {
 	}
 }
 
+func TestHandleFeedKey_markSourceRead_marksOnlySelectedSource(t *testing.T) {
+	st := newSeededStore(t)
+	now := time.Now()
+	items := []model.Item{
+		{ID: "a1", Kind: model.KindRSS, SourceID: "feed:a", SourceName: "Feed A", Title: "A One", Published: now.Add(-1 * time.Minute)},
+		{ID: "a2", Kind: model.KindRSS, SourceID: "feed:a", SourceName: "Feed A", Title: "A Two", Published: now.Add(-2 * time.Minute)},
+		{ID: "b1", Kind: model.KindRSS, SourceID: "feed:b", SourceName: "Feed B", Title: "B One", Published: now.Add(-3 * time.Minute)},
+	}
+	if err := st.UpsertItems(context.Background(), items); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+	m, err := New(st, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: items})
+
+	// The newest item (a1, Feed A) is selected first.
+	if sel, ok := m.feed.Selected(); !ok || sel.SourceID != "feed:a" {
+		t.Fatalf("precondition: selected = %#v (ok=%v), want a Feed A row", sel, ok)
+	}
+
+	m, cmd := step(t, m, tea.KeyPressMsg{Code: 'S', Text: "S"})
+	if cmd == nil {
+		t.Fatal("'S' returned nil cmd, want a mark+reload command")
+	}
+	if _, ok := cmd().(reloadMsg); !ok {
+		t.Fatal("'S' cmd did not produce reloadMsg")
+	}
+	if !strings.Contains(m.status, "Feed A") {
+		t.Errorf("status = %q, want it to name the marked source", m.status)
+	}
+
+	// The whole of Feed A is now read; Feed B is untouched.
+	read, err := st.Query(context.Background(), model.Filter{Read: model.ReadReadOnly})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	readIDs := map[string]bool{}
+	for _, it := range read {
+		readIDs[it.ID] = true
+	}
+	if !readIDs["a1"] || !readIDs["a2"] {
+		t.Errorf("Feed A not fully read; read set = %v, want a1 and a2", readIDs)
+	}
+	if readIDs["b1"] {
+		t.Error("Feed B item was marked read, want it left untouched")
+	}
+}
+
+func TestHandleFeedKey_markSourceRead_emptyFeedIsNoop(t *testing.T) {
+	st := newSeededStore(t) // no items
+	m, err := New(st, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m, _ = step(t, m, itemsLoadedMsg{items: nil})
+
+	if _, cmd := step(t, m, tea.KeyPressMsg{Code: 'S', Text: "S"}); cmd != nil {
+		t.Error("'S' on an empty feed returned a command, want nil (no-op)")
+	}
+}
+
+func TestHandleFeedKey_markSourceRead_emptySourceIDIsNoop(t *testing.T) {
+	m, _ := newSeededModel(t)
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	// A selected row with no SourceID must not trigger a mark — an empty id would
+	// otherwise be passed straight through to the source filter.
+	m, _ = step(t, m, itemsLoadedMsg{items: []model.Item{
+		{ID: "x", Kind: model.KindRSS, SourceName: "Orphan", Title: "No Source"},
+	}})
+
+	if _, cmd := step(t, m, tea.KeyPressMsg{Code: 'S', Text: "S"}); cmd != nil {
+		t.Error("'S' on an item with no SourceID returned a command, want nil (no-op)")
+	}
+}
+
+func TestSourceLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		it   model.Item
+		want string
+	}{
+		{"prefers display name", model.Item{SourceName: "Feed A", SourceID: "feed:a"}, "Feed A"},
+		{"falls back to id when name is empty", model.Item{SourceID: "feed:a"}, "feed:a"},
+	}
+	for _, tt := range tests {
+		if got := sourceLabel(tt.it); got != tt.want {
+			t.Errorf("%s: sourceLabel = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestRelTime(t *testing.T) {
 	tests := []struct {
 		d    time.Duration

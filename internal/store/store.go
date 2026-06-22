@@ -382,9 +382,13 @@ func escapeLike(s string) string {
 
 // inClause builds an "IN (?,?,…)" placeholder fragment and its argument slice.
 // Keys are sorted so the generated SQL and argument order are deterministic
-// (Go map iteration order is randomized).
+// (Go map iteration order is randomized), which keeps SQLite's prepared-statement
+// plan cache warm across calls. A single key is already deterministic, so the
+// sort is skipped in that (common) case.
 func inClause(keys []string) (placeholders string, args []any) {
-	sort.Strings(keys)
+	if len(keys) > 1 {
+		sort.Strings(keys)
+	}
 	marks := make([]string, len(keys))
 	args = make([]any, len(keys))
 	for i, k := range keys {
