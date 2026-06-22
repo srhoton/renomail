@@ -83,6 +83,7 @@ go build ./cmd/renomail    # produces ./renomail
 | `o`            | open the current item's permalink in the browser  |
 | `m`            | toggle the selected item's read flag              |
 | `M`            | mark every item in the current filter read        |
+| `S`            | mark every item from the selected source read     |
 | `/`            | search (substring over title, sender, and body)   |
 | `e` / `r`      | show email only / RSS only                        |
 | `u` / `a`      | show unread only / reset all filters              |

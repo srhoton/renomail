@@ -368,6 +368,41 @@ func TestMarkAllRead_onlyAffectsMatchingSubset(t *testing.T) {
 	}
 }
 
+func TestMarkAllRead_scopedBySourceID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	seed := []model.Item{
+		newItem("a1", "feedA", model.KindRSS, 100),
+		newItem("a2", "feedA", model.KindRSS, 200),
+		newItem("b1", "feedB", model.KindRSS, 300),
+	}
+	if err := s.UpsertItems(ctx, seed); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+
+	// Mark every item from feedA read, leaving other sources untouched.
+	if err := s.MarkAllRead(ctx, model.Filter{SourceIDs: map[string]bool{"feedA": true}}); err != nil {
+		t.Fatalf("MarkAllRead: %v", err)
+	}
+
+	read, err := s.Query(ctx, model.Filter{Read: model.ReadReadOnly})
+	if err != nil {
+		t.Fatalf("Query(read): %v", err)
+	}
+	if g := ids(read); !equalStrings(g, []string{"a2", "a1"}) {
+		t.Errorf("read after MarkAllRead(feedA) = %v, want feedA's items [a2 a1]", g)
+	}
+
+	unread, err := s.Query(ctx, model.Filter{Read: model.ReadUnreadOnly})
+	if err != nil {
+		t.Fatalf("Query(unread): %v", err)
+	}
+	if g := ids(unread); !equalStrings(g, []string{"b1"}) {
+		t.Errorf("unread after MarkAllRead(feedA) = %v, want [b1]", g)
+	}
+}
+
 func TestSetGetBody_roundTrip(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
