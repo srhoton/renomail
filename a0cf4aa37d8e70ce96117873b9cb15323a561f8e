@@ -1,0 +1,33 @@
+Session prompts (verbatim) that produced this commit
+=====================================================
+
+[Feature request]
+Ok, so now I have a fairly large enhancement I need you to think through. I'd
+like to add new slack notifications to the scroll. Can you think through that
+implementation?
+
+[Plan-mode clarifying answers]
+- Message style: "Rich (titles + links)" — list each new item's title,
+  source/sender, and a clickable link (Block Kit), capped with "+N more";
+  requires the store/engine to return WHICH items are new, not just a count.
+- Cadence: "One post per sweep" — coalesce all sources that got new items in a
+  single sync sweep into ONE Slack message.
+- Scope: "All sources" — every configured Gmail account and feed triggers Slack.
+
+[/review]
+Ran the four-reviewer pass. Result: zero CRITICAL/HIGH; ADR PASS. Informational
+findings (MEDIUM/LOW) raised across functional/quality/performance.
+
+[/review — fix scope answer]
+"PLease address all findings." — fixed all informational findings, including the
+two judgment calls: env-supplied webhook held to the https check (#5), and the
+per-sweep digest moved off the engine loop into a WaitGroup-drained goroutine for
+shutdown safety (#1). Re-reviewed the async-digest change (functional +
+performance): both approved, no new CRITICAL/HIGH; engine tests pass under
+-race -count=3.
+
+[/trueup]
+ok. Please commit your work, add prompts in this session to the commit via git
+notes, push it, and using your github cli tool, create a PR. Make sure the README
+for the PR accurately describes the changes made from a full diff from the branch
+you are merging into.
