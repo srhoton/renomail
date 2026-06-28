@@ -51,6 +51,40 @@ account = "work@gmail.com"
 
 Omit all `[[gmail]]` blocks to run RSS-only (no `credentials.json` needed).
 
+## Apple Mail accounts — `[apple_mail]`
+
+macOS only. A single flag opts in the local, read-only Apple Mail source; when on,
+**every** account Apple Mail has on disk is discovered automatically and each account's
+**Inbox** is folded into the feed. There is no per-account setup — renomail reads a
+private copy of Apple Mail's local index and never writes to `~/Library/Mail`.
+
+| Key       | Type | Required | Description                                  |
+| --------- | ---- | -------- | -------------------------------------------- |
+| `enabled` | bool | no       | `true` turns the source on. Default: `false`. |
+
+```toml
+[apple_mail]
+enabled = true
+```
+
+Reading Apple Mail's data requires **Full Disk Access** for the terminal running
+renomail (System Settings → Privacy & Security → Full Disk Access). Without it renomail
+keeps running — your feeds and Gmail are unaffected — and surfaces a one-line reminder
+on the status bar instead of failing.
+
+Notes:
+
+- **Inbox only.** Sent, Junk, Archive, and custom mailboxes are not ingested.
+- **Read-only.** Reading an item in renomail never changes Apple Mail; new arrivals
+  trigger the same notifications as any other source.
+- Bodies load on demand from the local `.emlx` files; a not-yet-downloaded message
+  falls back to its snippet. Each item also carries a `message://` link that opens it
+  in Mail.app.
+- Gmail accounts in Apple Mail usually keep an empty local Inbox (mail lives under
+  `[Gmail]/All Mail`), so this primarily surfaces iCloud/Exchange/IMAP inboxes; use the
+  native `[[gmail]]` integration for Gmail.
+- Off macOS the flag is accepted but yields no providers (a single advisory warning).
+
 ## Feeds via OPML — `[[opml]]`
 
 One block per OPML file. Every feed in the file becomes a source. `~` is expanded

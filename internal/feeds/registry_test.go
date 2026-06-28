@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -205,5 +206,53 @@ func TestBuildGmailProviders_badLookback_returnsWarning(t *testing.T) {
 	providers, warns := BuildGmailProviders(context.Background(), cfg, gmailTestPaths(t))
 	if len(providers) != 0 || len(warns) != 1 {
 		t.Errorf("bad lookback: providers=%d warns=%d, want 0/1", len(providers), len(warns))
+	}
+}
+
+func TestBuildAppleMailProviders_disabled_returnsNothing(t *testing.T) {
+	// Absent table and an explicit enabled=false are both off.
+	for _, cfg := range []config.Config{
+		{},
+		{AppleMail: &config.AppleMailConfig{Enabled: false}},
+	} {
+		providers, warns := BuildAppleMailProviders(context.Background(), cfg)
+		if len(providers) != 0 || len(warns) != 0 {
+			t.Errorf("disabled: providers=%d warns=%d, want 0/0", len(providers), len(warns))
+		}
+	}
+}
+
+func TestBuildAppleMailProviders_enabledNoMail_returnsNothing(t *testing.T) {
+	// Point the home dir at an empty tree so the Apple Mail root does not exist.
+	// On darwin that means "nothing to read" — no providers, no warning. Off darwin
+	// the stub reports ErrUnsupported, which surfaces as a single advisory warning;
+	// either way no providers and the build stays green.
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Config{AppleMail: &config.AppleMailConfig{Enabled: true}}
+
+	providers, warns := BuildAppleMailProviders(context.Background(), cfg)
+	if len(providers) != 0 {
+		t.Errorf("enabled but no mail: providers=%d, want 0", len(providers))
+	}
+	wantWarns := 0
+	if runtime.GOOS != "darwin" {
+		wantWarns = 1 // ErrUnsupported
+	}
+	if len(warns) != wantWarns {
+		t.Errorf("enabled but no mail on %s: warns=%d, want %d", runtime.GOOS, len(warns), wantWarns)
+	}
+}
+
+func TestBuildAppleMailProviders_badLookback_returnsWarning(t *testing.T) {
+	cfg := config.Config{
+		Lookback:  "not-a-duration",
+		AppleMail: &config.AppleMailConfig{Enabled: true},
+	}
+	providers, warns := BuildAppleMailProviders(context.Background(), cfg)
+	if len(providers) != 0 || len(warns) != 1 {
+		t.Fatalf("bad lookback: providers=%d warns=%d, want 0/1", len(providers), len(warns))
+	}
+	if !strings.Contains(warns[0].Error(), "apple mail") {
+		t.Errorf("warning = %v, want it to mention apple mail", warns[0])
 	}
 }

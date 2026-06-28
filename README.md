@@ -1,19 +1,24 @@
 # renomail
 
-A single terminal inbox for everything you read: your RSS/Atom feeds **and** your
-Gmail, side by side in one keyboard-driven TUI.
+A single terminal inbox for everything you read: your RSS/Atom feeds, your Gmail,
+**and** (on macOS) your local Apple Mail accounts, side by side in one keyboard-driven
+TUI.
 
 renomail fetches your feeds and (read-only) Gmail in the background, caches
 everything locally in SQLite, and renders a unified, newest-first feed you can
 filter, search, and read without leaving the terminal. Read/unread state is
-**local** — marking something read never touches Gmail or a feed; it just dims the
-row so you can tell what is new at a glance.
+**local** — marking something read never touches Gmail, a feed, or Apple Mail; it just
+dims the row so you can tell what is new at a glance.
 
 ## Highlights
 
-- **One feed for RSS + Gmail** — items from every source interleave, newest first.
+- **One feed for RSS + Gmail + Apple Mail** — items from every source interleave,
+  newest first.
 - **Read-only Gmail** — the only OAuth scope requested is `gmail.readonly`; renomail
   never modifies a mailbox.
+- **Read-only Apple Mail (macOS)** — opt in with a single flag to surface every Apple
+  Mail account's inbox straight off disk, no extra credentials; renomail only ever
+  reads a copy of Apple Mail's local index and never writes to `~/Library/Mail`.
 - **Background sync** — an initial sweep on launch, then periodic re-syncs; a spinner
   and a "synced N ago · M sources" indicator live in the status bar. One failing
   source surfaces its error on the status line without blocking the others.
@@ -91,6 +96,31 @@ go build ./cmd/renomail    # produces ./renomail
 | `R`            | sync now (force an immediate sweep)               |
 | `?`            | toggle full help                                  |
 | `q` / `Ctrl+C` | quit                                              |
+
+## Apple Mail (macOS, read-only)
+
+On macOS, renomail can fold your Apple Mail (Mail.app) accounts into the same feed.
+It reads a private copy of Apple Mail's local index — no IMAP setup, no credentials —
+and lists each account's **Inbox**. Bodies are loaded on demand from the local message
+files, and each item carries a `message://` link that opens it in Mail.app. renomail
+never writes to `~/Library/Mail`.
+
+Enable it with a single flag (all discovered accounts are included):
+
+```toml
+[apple_mail]
+enabled = true
+```
+
+Reading Apple Mail's data requires **Full Disk Access** for your terminal: grant it in
+System Settings → Privacy & Security → Full Disk Access. Without it, renomail keeps
+running (your feeds and Gmail are unaffected) and shows a one-line reminder on the
+status bar. New Apple Mail arrivals trigger the same notifications as every other
+source. See [docs/CONFIG.md](docs/CONFIG.md#apple-mail-accounts--apple_mail) for details.
+
+Gmail accounts added to Apple Mail usually keep an empty local Inbox (mail lives under
+`[Gmail]/All Mail`), so Apple Mail naturally surfaces your iCloud/Exchange/IMAP inboxes
+while the native **Read-only Gmail** integration handles Gmail.
 
 ## Notifications
 

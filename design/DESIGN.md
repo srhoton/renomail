@@ -59,7 +59,8 @@ renomail/
 │   ├── source/
 │   │   ├── source.go           # Provider interface
 │   │   ├── gmail/              # Gmail provider + OAuth flow + MIME parsing
-│   │   └── rss/                # gofeed provider + OPML import
+│   │   ├── rss/                # gofeed provider + OPML import
+│   │   └── applemail/          # macOS local read-only Apple Mail (Envelope Index + .emlx)
 │   ├── syncengine/             # background fetch scheduler, fan-in to UI
 │   ├── render/                 # HTML → markdown → Glamour pipeline
 │   └── ui/
@@ -174,6 +175,35 @@ type Provider interface {
   `ETag`/`LastModified`; on `304` skip. Bound concurrency (e.g. 8 feeds at once).
 - **Body:** typically already present; if a feed only ships summaries, `o` opens
   the permalink in a browser.
+
+### 4.3 Apple Mail provider (`source/applemail`, macOS, read-only)
+
+- **No auth.** Reads Apple Mail's (Mail.app) local store directly. Gated by a single
+  `[apple_mail] enabled = true` flag; when on, **all** accounts are discovered and one
+  `Provider` is created per account's **Inbox**. Items reuse `model.KindEmail`, so they
+  inherit the email treatment already wired through the engine, store, UI, and
+  notifications — accounts are distinguished by `Name`, not `Kind`.
+- **Index:** `~/Library/Mail/V<n>/MailData/Envelope Index` (SQLite). The `V<n>` is the
+  highest version directory (bumps per macOS release — discovered, never hardcoded).
+- **Safe read:** to avoid contending with a running Mail.app and to never write to
+  `~/Library/Mail`, each fetch copies the index (plus any `-wal`/`-shm`) to a private
+  temp file and opens that copy read-only (`query_only`), then deletes it.
+- **Account discovery:** distinct accounts that own an INBOX mailbox (parsed from the
+  `mailboxes.url`); display name resolved best-effort (Sent-mailbox sender → top INBOX
+  recipient → short-UUID fallback).
+- **List fetch:** non-deleted INBOX rows at/after the lower bound (`since`, else
+  `now − lookback` on cold start), newest first, mapped from `messages` joined to
+  `subjects`/`addresses`/`summaries`/`message_global_data`.
+- **Identity:** native id = the RFC-822 Message-ID header (stable across an index
+  rebuild) when present, else a `rowid:` fallback; the stable `Item.ID` derives from it.
+  `URL` is a `message://` deep link that opens the message in Mail.app.
+- **Body (lazy):** locate the message's `.emlx`/`.partial.emlx` by row id under the
+  account's `INBOX.mbox`, strip the emlx length-prefix + trailing plist, and parse the
+  RFC-822 MIME (stdlib) into HTML/text. A body not present locally falls back to the
+  snippet — never an error.
+- **Full Disk Access:** required (macOS TCC). Discovery returns a typed `ErrNoAccess`
+  when the data is unreadable so the builder surfaces actionable guidance; the rest of
+  renomail keeps running. Off macOS a build-tagged stub returns `ErrUnsupported`.
 
 ---
 
@@ -318,12 +348,17 @@ account = "work@gmail.com"
 [[opml]]
 path = "~/feeds.opml"      # may list several; or use [[feed]] for one-offs
 
+[apple_mail]               # optional, macOS: local read-only Apple Mail (§4.3)
+enabled = true             # one flag → all accounts' inboxes
+
 [slack]                    # optional: per-sweep Slack webhook digest
 webhook_url = "https://hooks.slack.com/services/T/B/X"
 max_items   = 10
 ```
 
 `tmux_notifications` (bool, default on) gates the tmux status-line ping. The
+`[apple_mail]` table (pointer, absent = off) opts in the local Apple Mail source
+(§4.3); on macOS it needs Full Disk Access. The
 `[slack]` table configures the Slack digest (§9); its `webhook_url` may instead be
 supplied via `RENOMAIL_SLACK_WEBHOOK`, which takes precedence and keeps the secret
 off disk. Both are resolved in the cmd layer so `config`/`ui` stay env-free.

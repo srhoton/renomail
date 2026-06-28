@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/srhoton/renomail/internal/config"
+	"github.com/srhoton/renomail/internal/source/applemail"
 	"github.com/srhoton/renomail/internal/source/gmail"
 	"github.com/srhoton/renomail/internal/source/rss"
 	"github.com/srhoton/renomail/internal/store"
@@ -74,6 +75,28 @@ func BuildGmailProviders(ctx context.Context, cfg config.Config, paths config.Pa
 		providers = append(providers, p)
 	}
 	return providers, warnings
+}
+
+// BuildAppleMailProviders constructs one read-only Apple Mail provider per local
+// account when [apple_mail] is enabled, and nothing when it is not. Like the Gmail
+// builder it never fails the run: a missing Full Disk Access grant (ErrNoAccess), a
+// non-macOS build (ErrUnsupported), or any other discovery error is returned as an
+// advisory warning, while Apple Mail simply not being set up yields no providers and
+// no warning. The error wraps applemail.ErrNoAccess, whose message already tells the
+// user how to grant access.
+func BuildAppleMailProviders(ctx context.Context, cfg config.Config) ([]*applemail.Provider, []error) {
+	if !cfg.AppleMailEnabled() {
+		return nil, nil
+	}
+	lookback, err := cfg.LookbackDuration()
+	if err != nil {
+		return nil, []error{fmt.Errorf("apple mail lookback: %w", err)}
+	}
+	providers, err := applemail.Discover(ctx, lookback)
+	if err != nil {
+		return nil, []error{fmt.Errorf("apple mail: %w", err)}
+	}
+	return providers, nil
 }
 
 // collectRefs gathers feed references from every OPML file and one-off feed in
