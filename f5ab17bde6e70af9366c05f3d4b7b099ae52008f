@@ -1,0 +1,13 @@
+Session prompts (verbatim) — config dir (~/.config) fix
+
+1. "Ok, I've pulled down the latest version, and configured it to read apple
+mail correctly (I believe). I know I have one unread message in the
+'sprhoto@gmail.com' inbox, but I don't see it. I also don't see any indication
+it tried to sync apple or rss. Could you troubleshoot?"
+
+2. "Yes, fix paths.go and run the suite"
+
+(Landed via this session's /trueup: "ok. Please commit your work, add prompts in
+this session to the commit via git notes, push it, and using your github cli
+tool, create a PR. Make sure the README for the PR accurately describes the
+changes made from a full diff from the branch you are merging into.")
