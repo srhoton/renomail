@@ -42,7 +42,9 @@ func TestResolvePaths_honorsXDGOverrides(t *testing.T) {
 }
 
 func TestResolvePaths_fallsBackWithoutXDG(t *testing.T) {
-	// Empty XDG vars force the os.UserConfigDir / home fallback branches.
+	// Empty XDG vars force the ~/.config and ~/.local/share defaults — notably NOT
+	// os.UserConfigDir() (~/Library/Application Support on macOS), so the documented
+	// ~/.config/renomail path is honored on every platform.
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")
 
@@ -50,8 +52,9 @@ func TestResolvePaths_fallsBackWithoutXDG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolvePaths() error = %v", err)
 	}
-	if filepath.Base(p.ConfigDir) != "renomail" {
-		t.Errorf("ConfigDir = %q, want basename renomail", p.ConfigDir)
+	wantConfigSuffix := filepath.Join(".config", "renomail")
+	if !strings.HasSuffix(p.ConfigDir, wantConfigSuffix) {
+		t.Errorf("ConfigDir = %q, want suffix %q", p.ConfigDir, wantConfigSuffix)
 	}
 	wantDataSuffix := filepath.Join(".local", "share", "renomail")
 	if !strings.HasSuffix(p.DataDir, wantDataSuffix) {

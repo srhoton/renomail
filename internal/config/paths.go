@@ -47,16 +47,19 @@ func ResolvePaths() (Paths, error) {
 	}, nil
 }
 
-// configBaseDir returns XDG_CONFIG_HOME or the OS user config dir.
+// configBaseDir returns XDG_CONFIG_HOME or ~/.config. It mirrors dataBaseDir's
+// XDG-style default rather than os.UserConfigDir() — which resolves to
+// ~/Library/Application Support on macOS — so the documented ~/.config/renomail
+// location is honored on every platform (DESIGN.md §8, docs/CONFIG.md).
 func configBaseDir() (string, error) {
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
 		return v, nil
 	}
-	dir, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve config dir: %w", err)
+		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
-	return dir, nil
+	return filepath.Join(home, ".config"), nil
 }
 
 // dataBaseDir returns XDG_DATA_HOME or ~/.local/share.
