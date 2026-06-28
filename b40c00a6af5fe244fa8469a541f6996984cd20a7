@@ -1,0 +1,22 @@
+Session prompts (verbatim) — Apple Mail label-aware fix
+
+1. "Ok, so the issue for your apple mail suggestion is that the *entire* point
+of the app is to surface new things - emails, articles, whatnot. What you have
+designed here is an apple mail solution that can never actually do that,
+correct? The purpose of the apple mail solution is that there are times (like
+with my work gmail account) where it would be impossible to set up the oauth
+config. Is there another way to do this, either in apple mail or a gmail
+configuration?"
+
+(plan-mode answers: import Apple Mail's read/unread state on first insert;
+land as a follow-up to PR #17.)
+
+2. /review — comprehensive four-reviewer local review.
+
+3. (review answer) Fix scope = "Fix all (recommended)" — sharded-path os.Stat
+fast path, COALESCE(m.read,0) NULL-safety, labels-table guard, empty-segment tidy.
+
+4. /trueup — "ok. Please commit your work, add prompts in this session to the
+commit via git notes, push it, and using your github cli tool, create a PR.
+Make sure the README for the PR accurately describes the changes made from a
+full diff from the branch you are merging into."
