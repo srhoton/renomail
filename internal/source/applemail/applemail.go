@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -181,7 +182,7 @@ func (p *Provider) Fetch(ctx context.Context, since time.Time) ([]model.Item, er
 // and returns nil — the reader falls back to the snippet; only a real read/parse
 // failure is surfaced as an error.
 func (p *Provider) Body(ctx context.Context, item *model.Item) error {
-	rowid, found, err := p.resolveRowID(ctx, item.NativeID)
+	rowid, mailboxURL, found, err := p.resolveRowID(ctx, item.NativeID)
 	if err != nil {
 		return fmt.Errorf("apple mail body %s: %w", item.ID, err)
 	}
@@ -189,7 +190,7 @@ func (p *Provider) Body(ctx context.Context, item *model.Item) error {
 		return nil
 	}
 
-	path, ok, err := findEmlx(p.root, p.acctID, rowid)
+	path, ok, err := findEmlx(p.root, p.acctID, mailboxURL, rowid)
 	if err != nil {
 		return fmt.Errorf("apple mail body %s: %w", item.ID, err)
 	}
@@ -209,24 +210,42 @@ func (p *Provider) Body(ctx context.Context, item *model.Item) error {
 }
 
 // resolveRowID maps an item's native id to its Envelope Index row id (the .emlx
-// filename). A "rowid:" native id is parsed directly and needs no index access at
-// all; an RFC-822 Message-ID is looked up in the shared snapshot. found is false when
-// the message is not in the index. Keeping the rowid path index-free is what lets a
-// fast preview-pane scroll avoid touching the database.
-func (p *Provider) resolveRowID(ctx context.Context, nativeID string) (rowid int64, found bool, err error) {
+// filename) and the message's storage mailbox url (so Body can scope its file search
+// to the mailbox that actually holds the .emlx — All Mail for a Gmail inbox message).
+// A "rowid:" native id is parsed directly, then a single cheap indexed lookup resolves
+// its storage mailbox to scope the search; an RFC-822 Message-ID is looked up in the
+// shared snapshot. The mailbox url is best-effort — if it can't be resolved, it is left
+// empty and findEmlx falls back to the account-wide walk. found is false when the
+// message is not in the index.
+func (p *Provider) resolveRowID(ctx context.Context, nativeID string) (rowid int64, mailboxURL string, found bool, err error) {
 	if rest, ok := strings.CutPrefix(nativeID, "rowid:"); ok {
 		n, perr := strconv.ParseInt(rest, 10, 64)
-		return n, perr == nil && n > 0, nil
+		if perr != nil || n <= 0 {
+			return 0, "", false, nil
+		}
+		// Resolve the storage mailbox so Body can scope its search (and use the sharded
+		// fast path) rather than walking the whole account for this id. The lookup is
+		// best-effort: any failure degrades to an empty url (account-wide walk), never a
+		// Body error, since the id itself is already known.
+		uerr := withIndex(p.root, func(db *sql.DB) error {
+			u, qerr := mailboxURLByRowid(ctx, db, n)
+			mailboxURL = u
+			return qerr
+		})
+		if uerr != nil {
+			mailboxURL = ""
+		}
+		return n, mailboxURL, true, nil
 	}
 	err = withIndex(p.root, func(db *sql.DB) error {
-		r, ok, qerr := rowidByMessageID(ctx, db, nativeID)
-		rowid, found = r, ok
+		r, u, ok, qerr := rowidByMessageID(ctx, db, nativeID)
+		rowid, mailboxURL, found = r, u, ok
 		return qerr
 	})
 	if errors.Is(err, errNoMailData) {
-		return 0, false, nil
+		return 0, "", false, nil
 	}
-	return rowid, found, err
+	return rowid, mailboxURL, found, err
 }
 
 // withIndex runs fn against a private, read-only snapshot of Apple Mail's Envelope
@@ -493,26 +512,96 @@ func parseVersionDir(name string) (int, bool) {
 	return n, true
 }
 
-// findEmlx locates the .emlx (preferred) or .partial.emlx file for a message row id
-// under the account's INBOX mailbox. The on-disk path shards by reversed row-id
-// digits in a layout that varies, so it walks the bounded INBOX.mbox subtree and
-// matches by filename rather than re-deriving the path. ok is false when no file is
-// present (body not downloaded).
-func findEmlx(root, acctID string, rowid int64) (path string, ok bool, err error) {
+// findEmlx locates the .emlx (preferred) or .partial.emlx file for a message row id.
+// It searches the message's storage mailbox subtree — derived from mailboxURL, e.g.
+// [Gmail].mbox/All Mail.mbox for a Gmail inbox message, which is NOT under INBOX.mbox —
+// and falls back to the whole account directory when the mailbox can't be mapped (an
+// empty url, as with a "rowid:" native id). The on-disk path shards by row-id digits in
+// a layout that varies, so it walks and matches by filename rather than re-deriving the
+// path. ok is false when no file is present (body not downloaded).
+func findEmlx(root, acctID, mailboxURL string, rowid int64) (path string, ok bool, err error) {
 	vdir, err := latestVDir(root)
 	if err != nil || vdir == "" {
 		return "", false, err
 	}
-	base := filepath.Join(vdir, acctID, "INBOX.mbox")
+	acctDir := filepath.Join(vdir, acctID)
+
+	base := acctDir // account-wide fallback when the mailbox is unknown/unmappable
+	if mbDir := mailboxDirFromURL(acctDir, acctID, mailboxURL); mbDir != "" {
+		if fi, statErr := os.Stat(mbDir); statErr == nil && fi.IsDir() {
+			// Fast path: the .emlx sits at a path sharded by the row id, so stat it
+			// directly instead of walking a mailbox that can hold ~100k files. Fall
+			// back to the walk only when the derived path misses (a layout we don't
+			// model, or the body simply is not downloaded).
+			if hit, found := statShardedEmlx(mbDir, rowid); found {
+				return hit, true, nil
+			}
+			base = mbDir // scope the fallback walk to the mailbox that holds the .emlx
+		}
+	}
+
+	hit, err := walkForEmlx(base, strconv.FormatInt(rowid, 10))
+	if err != nil {
+		return "", false, err
+	}
+	if hit == "" {
+		return "", false, nil
+	}
+	return hit, true, nil
+}
+
+// statShardedEmlx checks the derived sharded location of a message's .emlx under each
+// store directory of mailboxDir, returning the first existing <id>.emlx (preferred) or
+// <id>.partial.emlx. Apple Mail shards messages under Data/<digits-of-rowid/1000,
+// least-significant-first>/Messages — e.g. row 152784 -> Data/2/5/1/Messages, and rows
+// below 1000 -> Data/Messages (no shard dirs). found is false when neither file is at
+// the derived path (the caller then falls back to a walk).
+func statShardedEmlx(mailboxDir string, rowid int64) (path string, found bool) {
+	stores, err := os.ReadDir(mailboxDir)
+	if err != nil {
+		return "", false
+	}
+	shards := emlxShards(rowid)
 	id := strconv.FormatInt(rowid, 10)
+	names := []string{id + ".emlx", id + ".partial.emlx"}
+	for _, st := range stores {
+		if !st.IsDir() {
+			continue
+		}
+		parts := append([]string{mailboxDir, st.Name(), "Data"}, shards...)
+		dir := filepath.Join(append(parts, "Messages")...)
+		for _, name := range names {
+			p := filepath.Join(dir, name)
+			if fi, serr := os.Stat(p); serr == nil && !fi.IsDir() {
+				return p, true
+			}
+		}
+	}
+	return "", false
+}
+
+// emlxShards returns the on-disk shard directories for a message row id: the decimal
+// digits of rowid/1000, least-significant first. Row ids below 1000 yield no shards
+// (the message lives directly under Data/Messages). Validated against the live store
+// (e.g. 152784 -> [2 5 1], 62473 -> [2 6], 999 -> []).
+func emlxShards(rowid int64) []string {
+	var dirs []string
+	for n := rowid / 1000; n > 0; n /= 10 {
+		dirs = append(dirs, strconv.FormatInt(n%10, 10))
+	}
+	return dirs
+}
+
+// walkForEmlx walks base for "<id>.emlx" (preferred) or "<id>.partial.emlx", returning
+// the first match's path or "" when none is present. A missing base is not an error.
+func walkForEmlx(base, id string) (string, error) {
 	full := id + ".emlx"
 	partial := id + ".partial.emlx"
-
 	var hit string
 	walkErr := filepath.WalkDir(base, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			if errors.Is(werr, fs.ErrNotExist) {
-				return fs.SkipAll // INBOX.mbox absent — nothing to find
+				return fs.SkipAll // subtree absent — nothing to find
 			}
 			return nil // tolerate a transient/permission hiccup on one entry
 		}
@@ -531,10 +620,40 @@ func findEmlx(root, acctID string, rowid int64) (path string, ok bool, err error
 		return nil
 	})
 	if walkErr != nil && !errors.Is(walkErr, fs.ErrNotExist) {
-		return "", false, walkErr
+		return "", walkErr
 	}
-	if hit == "" {
-		return "", false, nil
+	return hit, nil
+}
+
+// mailboxDirFromURL maps an Envelope Index mailbox url to its on-disk ".mbox" directory
+// under acctDir, e.g. "imap://<acct>/%5BGmail%5D/All%20Mail" ->
+// "<acctDir>/[Gmail].mbox/All Mail.mbox", and "imap://<acct>/INBOX" -> "<acctDir>/INBOX.mbox".
+// Each url path segment is percent-decoded and suffixed with ".mbox". It returns "" when
+// the url is empty, malformed, or belongs to a different account.
+func mailboxDirFromURL(acctDir, acctID, mailboxURL string) string {
+	i := strings.Index(mailboxURL, "://")
+	if i < 0 {
+		return ""
 	}
-	return hit, true, nil
+	rest := mailboxURL[i+3:]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 || rest[:slash] != acctID {
+		return ""
+	}
+	path := rest[slash+1:]
+	if path == "" {
+		return ""
+	}
+	dir := acctDir
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "" {
+			continue // tolerate a trailing/double slash without a spurious ".mbox"
+		}
+		decoded, derr := url.PathUnescape(seg)
+		if derr != nil {
+			decoded = seg
+		}
+		dir = filepath.Join(dir, decoded+".mbox")
+	}
+	return dir
 }

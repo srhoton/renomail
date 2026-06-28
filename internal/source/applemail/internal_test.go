@@ -100,8 +100,8 @@ func TestDiscoverFromRoot_picksHighestVersionAndIgnoresJunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverFromRoot: %v", err)
 	}
-	if len(provs) != 3 {
-		t.Fatalf("got %d providers, want 3 (V10 selected)", len(provs))
+	if len(provs) != 4 {
+		t.Fatalf("got %d providers, want 4 (V10 selected)", len(provs))
 	}
 }
 
@@ -245,7 +245,7 @@ func TestIndexSnapshot_concurrentReadersAndRefreshNoUseAfterClose(t *testing.T) 
 	go func() {
 		defer wg.Done()
 		base := time.Now()
-		for i := 0; i < 80; i++ {
+		for i := range 80 {
 			ts := base.Add(time.Duration(i) * time.Second)
 			_ = os.Chtimes(idx, ts, ts)
 			time.Sleep(time.Millisecond)
@@ -253,11 +253,11 @@ func TestIndexSnapshot_concurrentReadersAndRefreshNoUseAfterClose(t *testing.T) 
 	}()
 
 	// Readers: acquire, run a query on the shared DB, release.
-	for g := 0; g < 8; g++ {
+	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < 60; i++ {
+			for range 60 {
 				s, err := indexCache.acquire(root)
 				if err != nil {
 					t.Errorf("acquire: %v", err)
@@ -283,7 +283,7 @@ func TestDiscover_usesMailRootSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	if len(provs) != 3 {
-		t.Fatalf("got %d providers, want 3", len(provs))
+	if len(provs) != 4 {
+		t.Fatalf("got %d providers, want 4", len(provs))
 	}
 }
