@@ -1,0 +1,27 @@
+Session prompts (verbatim) — Apple Mail source
+
+1. (plan request)
+"Ok, now I have additional functionality I want you to think out. Today, our app can read from gmail. Now, I would like it to be able to:
+-  read the local apple mail config
+- Read in the accounts in apple mail if a flag is set.
+- Produce read only notifications if new mail comes in to the apple mail accounts.
+Assuming this is possible, can you plan that out?"
+
+2. (plan-mode AskUserQuestion answers)
+- Account scope = "All accounts (single flag)"
+- Mailbox scope = "INBOX only"
+- Reading pane = "Parse local .emlx (full body)"
+
+3. (after plan approval, implementation proceeded; then)
+/review  — comprehensive four-reviewer local review.
+
+4. (review AskUserQuestion answer)
+Fix scope = "Fix all (recommended)" — root-cause the CRITICAL/HIGH perf via a shared
+mtime+wal-gated index snapshot + rowid fast-path, plus the portability test fix and the
+low-risk correctness/quality items; re-run the full suite and re-review.
+
+5. /trueup
+"ok. Please commit your work, add prompts in this session to the commit via git notes,
+push it, and using your github cli tool, create a PR. Make sure the README for the PR
+accurately describes the changes made from a full diff from the branch you are merging
+into."
