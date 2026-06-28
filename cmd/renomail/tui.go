@@ -11,6 +11,7 @@ import (
 
 	"github.com/srhoton/renomail/internal/config"
 	"github.com/srhoton/renomail/internal/notify"
+	"github.com/srhoton/renomail/internal/source/applemail"
 	"github.com/srhoton/renomail/internal/source/rss"
 	"github.com/srhoton/renomail/internal/store"
 	"github.com/srhoton/renomail/internal/syncengine"
@@ -34,8 +35,16 @@ func runTUI(cfg config.Config, paths config.Paths, opts ...tea.ProgramOption) er
 
 	go eng.Run(ctx)
 
-	if _, err := tea.NewProgram(m, opts...).Run(); err != nil {
-		return fmt.Errorf("run tui: %w", err)
+	_, runErr := tea.NewProgram(m, opts...).Run()
+
+	// Stop the engine before releasing the shared Apple Mail snapshot so a sweep is
+	// not still acquiring it as we close. We do not join the engine goroutine here: its
+	// shutdown can block up to the digest timeout, which must not stall quitting.
+	cancel()
+	applemail.CloseCache()
+
+	if runErr != nil {
+		return fmt.Errorf("run tui: %w", runErr)
 	}
 	return nil
 }

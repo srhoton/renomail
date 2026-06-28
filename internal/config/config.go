@@ -46,6 +46,19 @@ type Config struct {
 	// environment variable (resolved by the command layer), keeping the secret out
 	// of the config file.
 	Slack *SlackConfig `toml:"slack"`
+
+	// AppleMail opts the macOS-local, read-only Apple Mail source in. It is a
+	// pointer so an absent [apple_mail] table leaves the feature off; when present,
+	// `enabled = true` auto-discovers every account Apple Mail has on disk and
+	// ingests each account's INBOX. There is no per-account credential — renomail
+	// reads Apple Mail's local index read-only (see internal/source/applemail).
+	AppleMail *AppleMailConfig `toml:"apple_mail"`
+}
+
+// AppleMailConfig gates the local Apple Mail source. A single flag is deliberate:
+// when on, all of Apple Mail's accounts are discovered and read (DESIGN.md §9.1).
+type AppleMailConfig struct {
+	Enabled bool `toml:"enabled"` // false (or an absent [apple_mail] table) ⇒ off
 }
 
 // SlackConfig holds the Slack incoming-webhook settings.
@@ -176,6 +189,14 @@ func (c Config) SlackMaxItems() int {
 		return c.Slack.MaxItems
 	}
 	return defaultSlackMaxItems
+}
+
+// AppleMailEnabled reports whether the local Apple Mail source is on. It is off
+// unless an [apple_mail] table is present with `enabled = true`. (On non-macOS
+// builds the provider layer is a stub, so an enabled flag there yields no
+// providers and a single advisory warning rather than an error.)
+func (c Config) AppleMailEnabled() bool {
+	return c.AppleMail != nil && c.AppleMail.Enabled
 }
 
 // parseDurationDefault parses s, substituting def when s is empty.

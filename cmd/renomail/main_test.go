@@ -156,6 +156,27 @@ func TestBuildTUI_withSlackConfig_succeeds(t *testing.T) {
 	}
 }
 
+func TestBuildTUI_appleMailEnabled_succeeds(t *testing.T) {
+	dir := t.TempDir()
+	paths := config.Paths{
+		DataDir: filepath.Join(dir, "data"),
+		DBFile:  filepath.Join(dir, "data", "renomail.db"),
+	}
+	// Enable Apple Mail but point HOME at an empty tree so discovery finds nothing:
+	// the wiring runs without needing Full Disk Access or real Apple Mail data.
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	cfg := config.Config{AppleMail: &config.AppleMailConfig{Enabled: true}}
+
+	_, st, eng, err := buildTUI(context.Background(), cfg, paths)
+	if err != nil {
+		t.Fatalf("buildTUI() with apple mail enabled error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if eng == nil {
+		t.Fatal("buildTUI() engine = nil, want a constructed sync engine")
+	}
+}
+
 func TestBuildTUI_nonHTTPSEnvWebhook_errors(t *testing.T) {
 	dir := t.TempDir()
 	paths := config.Paths{

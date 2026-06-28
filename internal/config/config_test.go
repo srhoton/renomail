@@ -147,6 +147,35 @@ func TestLoad_slackEmptyWebhook_allowed(t *testing.T) {
 	}
 }
 
+func TestLoad_appleMailBlock_parses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := writeFile(t, path, "[apple_mail]\nenabled = true\n"); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.AppleMail == nil {
+		t.Fatal("AppleMail = nil, want the parsed [apple_mail] table")
+	}
+	if !got.AppleMailEnabled() {
+		t.Error("AppleMailEnabled() = false, want true")
+	}
+}
+
+func TestAppleMailEnabled_defaults(t *testing.T) {
+	// Absent [apple_mail] table ⇒ disabled.
+	if (Config{}).AppleMailEnabled() {
+		t.Error("AppleMailEnabled() with no table = true, want false")
+	}
+	// Present but explicitly disabled ⇒ disabled.
+	if (Config{AppleMail: &AppleMailConfig{Enabled: false}}).AppleMailEnabled() {
+		t.Error("AppleMailEnabled() with enabled=false = true, want false")
+	}
+}
+
 func TestSave_unwritableParent_returnsError(t *testing.T) {
 	// Place a regular file where Save expects a directory, so MkdirAll fails.
 	blocker := filepath.Join(t.TempDir(), "blocker")
