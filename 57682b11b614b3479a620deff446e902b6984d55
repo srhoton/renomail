@@ -1,0 +1,29 @@
+Session prompts (read/unread write-back feature)
+
+1. (plan mode) "Ok, something else for you to think through. In the case of
+both gmail and apple mail, when renomail marks the email as read, I would
+like the email account (either gmail or apple mail) to also reflect that
+it's read. Could you plan out that implementation?"
+
+2. (AskUserQuestion answers)
+   - Gmail scope: "Upgrade to gmail.modify"
+   - Apple Mail mechanism: "AppleScript to Mail.app"
+   - Propagation: "Open / toggle a single message, Mark unread (reverse),
+     Mark All Read"
+
+3. (ExitPlanMode approved) implemented the plan.
+
+4. "/review" — ran the multi-pass local review (functional, code-quality,
+   security, performance). Round 1: 1 HIGH (pane-follow scroll fired a
+   write-back per fly-over row), 3 MEDIUM (Mark-All-Read divergence under a
+   read-only filter; missing context timeout; Apple Mail argv not chunked),
+   4 LOW.
+
+5. (AskUserQuestion) Fix scope: "Fix all (recommended)" — fixed all 8
+   findings; round-2 re-review of all four reviewers returned PASS/APPROVED
+   with no remaining or new CRITICAL/HIGH/MEDIUM.
+
+6. "/trueup" — "ok. Please commit your work, add prompts in this session to
+   the commit via git notes, push it, and using your github cli tool, create
+   a PR. Make sure the README for the PR accurately describes the changes
+   made from a full diff from the branch you are merging into."
