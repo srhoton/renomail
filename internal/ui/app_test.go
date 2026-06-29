@@ -674,8 +674,8 @@ func TestHandleFeedKey_markSourceRead_marksOnlySelectedSource(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("'S' returned nil cmd, want a mark+reload command")
 	}
-	if _, ok := cmd().(reloadMsg); !ok {
-		t.Fatal("'S' cmd did not produce reloadMsg")
+	if _, ok := cmd().(markedAllReadMsg); !ok {
+		t.Fatal("'S' cmd did not produce markedAllReadMsg")
 	}
 	if !strings.Contains(m.status, "Feed A") {
 		t.Errorf("status = %q, want it to name the marked source", m.status)
@@ -1019,8 +1019,8 @@ func TestHandleFeedKey_markAllRead_persistsAndReloads(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("M returned nil cmd, want markAllReadCmd")
 	}
-	if _, ok := cmd().(reloadMsg); !ok {
-		t.Fatalf("M cmd produced %T, want reloadMsg", cmd())
+	if _, ok := cmd().(markedAllReadMsg); !ok {
+		t.Fatalf("M cmd produced %T, want markedAllReadMsg", cmd())
 	}
 	// The store write happened when the command ran.
 	items, err := st.Query(context.Background(), model.Filter{})
@@ -1100,8 +1100,8 @@ func TestReadState_survivesReupsert(t *testing.T) {
 	m, st := loadedModel(t)
 	// Mark everything read via the UI, which persists through markAllReadCmd.
 	_, cmd := step(t, m, keyPress('M'))
-	if _, ok := cmd().(reloadMsg); !ok {
-		t.Fatal("M did not persist (no reloadMsg)")
+	if _, ok := cmd().(markedAllReadMsg); !ok {
+		t.Fatal("M did not persist (no markedAllReadMsg)")
 	}
 	// A subsequent re-sync (UpsertItems with the original unread flags) must not
 	// clobber the local read state — the step-02 guard, re-asserted at the UI level.

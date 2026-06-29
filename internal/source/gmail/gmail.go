@@ -7,8 +7,10 @@ package gmail
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
+	"net/http"
 	"net/mail"
 	"slices"
 	"strings"
@@ -16,6 +18,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
 	"github.com/srhoton/renomail/internal/config"
@@ -29,8 +32,22 @@ import (
 var metadataHeaders = []string{"From", "Subject", "Date"}
 
 // Provider implements source.Provider for a single Gmail account. The compile
-// assertion guards against signature drift breaking the contract silently.
-var _ source.Provider = (*Provider)(nil)
+// assertions guard against signature drift breaking either contract silently; the
+// second declares that this provider can also write read state back (SetRead).
+var (
+	_ source.Provider   = (*Provider)(nil)
+	_ source.ReadSyncer = (*Provider)(nil)
+)
+
+// ErrReauthorize signals that the stored token predates the gmail.modify scope, so a
+// write was refused (HTTP 403). It is sentinel so the UI can show an actionable
+// "re-run `renomail auth <account>`" hint instead of a raw API error; reads continue
+// to work on the old read-only grant.
+var ErrReauthorize = errors.New("gmail: token lacks write scope; run `renomail auth <account>` to re-authorize")
+
+// modifyBatchSize bounds one BatchModify call to the Gmail API's documented limit of
+// 1000 message ids; larger sets are chunked across calls.
+const modifyBatchSize = 1000
 
 // Provider is one configured Gmail account exposed through source.Provider. It is
 // safe for concurrent Fetch/Body calls: svc is an immutable client and the
@@ -184,6 +201,70 @@ func (p *Provider) Body(ctx context.Context, item *model.Item) error {
 	}
 	item.BodyHTML, item.BodyText = selectBodies(msg.Payload)
 	return nil
+}
+
+// SetRead reflects the read flag for the given Gmail message ids at the server by
+// toggling the UNREAD label: removing it marks read, adding it marks unread. It is the
+// source.ReadSyncer write-back path the UI invokes when renomail marks mail read/unread
+// locally. nativeIDs are the Gmail message ids stored as Item.NativeID (exactly what
+// the modify API takes); empty ids are skipped and an empty set is a no-op. Calls are
+// chunked to the API's 1000-id batchModify limit. A 403 from a token still on the old
+// read-only scope is mapped to ErrReauthorize so the caller can prompt a one-time
+// re-auth rather than surface a raw API error.
+func (p *Provider) SetRead(ctx context.Context, nativeIDs []string, read bool) error {
+	ids := nonEmpty(nativeIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	req := &gmail.BatchModifyMessagesRequest{}
+	if read {
+		req.RemoveLabelIds = []string{"UNREAD"}
+	} else {
+		req.AddLabelIds = []string{"UNREAD"}
+	}
+	for chunk := range slices.Chunk(ids, modifyBatchSize) {
+		req.Ids = chunk
+		if err := p.svc.Users.Messages.BatchModify("me", req).Context(ctx).Do(); err != nil {
+			if isInsufficientScope(err) {
+				return fmt.Errorf("%w (%s)", ErrReauthorize, p.account)
+			}
+			return fmt.Errorf("gmail set read for %s: %w", p.account, err)
+		}
+	}
+	return nil
+}
+
+// nonEmpty returns ids with blank entries removed, so a stray empty native id never
+// reaches the modify API (which would reject the whole batch).
+func nonEmpty(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// isInsufficientScope reports whether err is the Gmail API's 403 for a token that was
+// granted only gmail.readonly and so cannot modify labels — the signal that the account
+// must re-authorize for the upgraded gmail.modify scope. It matches a 403 carrying an
+// "insufficient ..." reason/message rather than every 403, so a genuine permission
+// error is not mislabeled as a re-auth prompt.
+func isInsufficientScope(err error) bool {
+	var gerr *googleapi.Error
+	if !errors.As(err, &gerr) || gerr.Code != http.StatusForbidden {
+		return false
+	}
+	if strings.Contains(strings.ToLower(gerr.Message), "insufficient") {
+		return true
+	}
+	for _, e := range gerr.Errors {
+		if e.Reason == "insufficientPermissions" || strings.Contains(strings.ToLower(e.Message), "insufficient") {
+			return true
+		}
+	}
+	return false
 }
 
 // toItem maps a Gmail message (metadata format) onto the unified model.Item. The

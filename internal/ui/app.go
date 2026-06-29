@@ -294,6 +294,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case reloadMsg:
 		return m, loadItemsCmd(m.store, m.filter)
+	case readSyncedMsg:
+		// Best-effort write-back: surface a failure on the status line but leave the
+		// already-persisted local read state untouched.
+		if msg.err != nil {
+			m.status = msg.err.Error()
+		}
+		return m, nil
+	case markedAllReadMsg:
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+		// Re-query the visible feed, then push the flipped items back to each source
+		// that supports write-back. The pushes are independent best-effort commands, so
+		// one source's failure never blocks the reload or another source.
+		cmds := []tea.Cmd{loadItemsCmd(m.store, m.filter)}
+		for srcID, ids := range msg.bySource {
+			if rs, ok := m.providers[srcID].(source.ReadSyncer); ok && len(ids) > 0 {
+				cmds = append(cmds, syncReadCmd(rs, ids, true))
+			}
+		}
+		return m, tea.Batch(cmds...)
 	case spinner.TickMsg:
 		// Only advance the spinner while a sweep is in flight; once it stops the
 		// tick loop ends (we stop returning the next tick command), so the status
@@ -471,7 +493,11 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		next := !it.Read
 		m.feed.SetReadLocal(it.ID, next) // optimistic; readToggledMsg confirms
-		return m, setReadCmd(m.store, it.ID, next)
+		cmds := []tea.Cmd{setReadCmd(m.store, it.ID, next)}
+		if c := m.syncReadFor(it, next); c != nil {
+			cmds = append(cmds, c) // best-effort write-back to Gmail/Apple Mail
+		}
+		return m, tea.Batch(cmds...)
 	case key.Matches(msg, m.keys.MarkAllRead):
 		return m, markAllReadCmd(m.store, m.filter)
 	case key.Matches(msg, m.keys.MarkSourceRead):
@@ -480,9 +506,9 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Mark the whole source read regardless of the active filter: a fresh
-		// source-only filter, not m.filter. The reload (reloadMsg) then re-queries
-		// with the current filter, so the source's rows dim — or drop, under an
-		// unread-only filter.
+		// source-only filter, not m.filter. The markedAllReadMsg handler then re-queries
+		// with the current filter (and pushes the change back to the source), so the
+		// source's rows dim — or drop, under an unread-only filter.
 		//
 		// Set a transient confirmation: with no filter active the only visible effect
 		// is the rows dimming. handleKey already cleared the prior status before
@@ -505,7 +531,7 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil // empty feed: the pane opens empty and fills on first selection
 		}
-		return m, m.openInPane(it)
+		return m, m.openInPane(it, true) // deliberate open: sync read state back
 	case key.Matches(msg, m.keys.Open):
 		it, ok := m.feed.Selected()
 		if !ok {
@@ -522,7 +548,7 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if already {
 			return m, nil
 		}
-		return m, m.openInPane(it)
+		return m, m.openInPane(it, true) // deliberate open: sync read state back
 	}
 	// Fall through: forward the key to the feed list (motion, etc.). When the preview
 	// pane is open, mirror it to the (possibly moved) selection so it tracks the cursor.
@@ -545,10 +571,16 @@ func (m Model) handleFeedKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // behavior — so m.openItem is now updated on plain motion keys in split mode, not only
 // on an explicit open (current() still keys off m.view, so its staleness caveat holds).
 //
+// syncBack gates the best-effort write-back to the source. A deliberate open (Enter, or
+// opening the pane on the current selection) passes true; passive pane-follow scrolling
+// passes false, so flying the cursor over the unread list dims rows locally without
+// spawning one Gmail call / osascript subprocess per fly-over row. Only the row the user
+// actually lands on (or explicitly toggles / Mark-All-Reads) is pushed to the source.
+//
 // The body render goes through loadBody so at most one render runs at a time; on a fast
 // scroll the intermediate rows update the header and mark read, but only the settled
 // row is actually rendered (see loadBody / the bodyLoadedMsg trailing edge).
-func (m *Model) openInPane(it model.Item) tea.Cmd {
+func (m *Model) openInPane(it model.Item, syncBack bool) tea.Cmd {
 	m.openID = it.ID
 	m.openItem = it // retained for resize re-render and open-in-browser
 	m.reader.SetHeader(it)
@@ -557,8 +589,28 @@ func (m *Model) openInPane(it model.Item) tea.Cmd {
 	if !it.Read {
 		m.feed.SetReadLocal(it.ID, true)
 		cmds = append(cmds, setReadCmd(m.store, it.ID, true))
+		if syncBack {
+			if c := m.syncReadFor(it, true); c != nil {
+				cmds = append(cmds, c) // best-effort write-back to Gmail/Apple Mail
+			}
+		}
 	}
 	return tea.Batch(cmds...)
+}
+
+// syncReadFor returns a command that pushes it's new read state back to its source when
+// that source supports write-back (Gmail via the API, Apple Mail via Mail.app), or nil
+// when it doesn't: RSS, an unknown source, or an item with no native id. The push is
+// best-effort and independent of the authoritative local store write.
+func (m Model) syncReadFor(it model.Item, read bool) tea.Cmd {
+	if it.NativeID == "" {
+		return nil
+	}
+	rs, ok := m.providers[it.SourceID].(source.ReadSyncer)
+	if !ok {
+		return nil
+	}
+	return syncReadCmd(rs, []string{it.NativeID}, read)
 }
 
 // providerFor returns the provider whose network body-fetch fallback should be used
@@ -599,7 +651,10 @@ func (m *Model) previewSelection() tea.Cmd {
 	if !ok || it.ID == m.openID {
 		return nil
 	}
-	return m.openInPane(it)
+	// Passive pane-follow: dim the row locally but do NOT push read state to the source
+	// for every fly-over (that would spawn one Gmail call / osascript subprocess per row
+	// on a fast scroll). Only deliberate opens, toggles, and Mark All Read sync back.
+	return m.openInPane(it, false)
 }
 
 // handleFilterKey handles the search bar: ctrl+c still quits, Esc cancels (keeping

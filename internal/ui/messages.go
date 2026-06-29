@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -40,6 +41,19 @@ type readToggledMsg struct {
 // after a store mutation (e.g. mark-all-read) so the re-query happens strictly
 // after the write completes, rather than racing it.
 type reloadMsg struct{}
+
+// readSyncedMsg reports the outcome of pushing a read-state change back to the source
+// account (Gmail/Apple Mail). It is best-effort: a failure is shown on the status line
+// but never rolls back the local read state, which is already persisted.
+type readSyncedMsg struct{ err error }
+
+// markedAllReadMsg carries the result of a mark-all-read store mutation: the native ids
+// that were flipped from unread to read, grouped by source id, so the model can both
+// re-query the feed and push the change back to each source that supports write-back.
+type markedAllReadMsg struct {
+	bySource map[string][]string
+	err      error
+}
 
 // syncBatchMsg carries one provider's sync outcome from the background engine
 // into the model. The engine has already upserted the items; the model only needs
@@ -111,6 +125,24 @@ func setReadCmd(st *store.Store, id string, read bool) tea.Cmd {
 	}
 }
 
+// syncReadWriteTimeout bounds one best-effort write-back so a hung remote — a stalled
+// Gmail call, or osascript blocked on a Mail.app modal / cold start — cannot leak the
+// command goroutine (and its subprocess) for the life of the session. It is generous
+// enough to cover a large Mark All Read batch.
+const syncReadWriteTimeout = 60 * time.Second
+
+// syncReadCmd pushes a read-state change for nativeIDs back to the source via its
+// ReadSyncer, off the UI goroutine. It runs independently of (and never blocks) the
+// local store write, so a slow or failing remote never stalls the UI; the outcome
+// returns as a readSyncedMsg. A bounded context reaps a hung remote rather than leaking.
+func syncReadCmd(rs source.ReadSyncer, nativeIDs []string, read bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), syncReadWriteTimeout)
+		defer cancel()
+		return readSyncedMsg{err: rs.SetRead(ctx, nativeIDs, read)}
+	}
+}
+
 // notifyCmd pushes a "new items" host notification off the UI goroutine for one
 // source's fresh arrivals. fn is the model's injected notifier (a no-op unless we
 // are inside tmux); a notifier failure surfaces as an errMsg on the status line
@@ -125,15 +157,36 @@ func notifyCmd(fn func(string) error, srcName string, n int) tea.Cmd {
 	}
 }
 
-// markAllReadCmd marks every item matching f as read, then asks the model to
-// re-query so the now-read items restyle (or drop out, under an unread-only
-// filter). The reload is returned as a message rather than chained with
-// tea.Sequence so it is guaranteed to run after the write.
+// markAllReadCmd marks every item matching f as read and reports which items flipped
+// (the currently-unread ones within f, grouped by source) so the model can re-query the
+// feed and push the change back to each write-back-capable source. The store is queried
+// for those ids before the bulk update so write-back targets exactly the items that
+// changed; an empty result still marks read and reloads. Running off the UI goroutine,
+// the markedAllReadMsg is delivered strictly after the write, so the re-query never
+// races it.
 func markAllReadCmd(st *store.Store, f model.Filter) tea.Cmd {
 	return func() tea.Msg {
-		if err := st.MarkAllRead(context.Background(), f); err != nil {
-			return errMsg{err}
+		// The items that actually flip are those matching f AND currently unread. A
+		// read-only filter matches no unread items, so nothing flips and there is nothing
+		// to write back — query and push only when unread items can be in scope.
+		var bySource map[string][]string
+		if f.Read != model.ReadReadOnly {
+			unread := f
+			unread.Read = model.ReadUnreadOnly
+			items, err := st.Query(context.Background(), unread)
+			if err != nil {
+				return markedAllReadMsg{err: err}
+			}
+			bySource = make(map[string][]string)
+			for _, it := range items {
+				if it.NativeID != "" {
+					bySource[it.SourceID] = append(bySource[it.SourceID], it.NativeID)
+				}
+			}
 		}
-		return reloadMsg{}
+		if err := st.MarkAllRead(context.Background(), f); err != nil {
+			return markedAllReadMsg{err: err}
+		}
+		return markedAllReadMsg{bySource: bySource}
 	}
 }

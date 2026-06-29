@@ -4,21 +4,25 @@ A single terminal inbox for everything you read: your RSS/Atom feeds, your Gmail
 **and** (on macOS) your local Apple Mail accounts, side by side in one keyboard-driven
 TUI.
 
-renomail fetches your feeds and (read-only) Gmail in the background, caches
-everything locally in SQLite, and renders a unified, newest-first feed you can
-filter, search, and read without leaving the terminal. Read/unread state is
-**local** — marking something read never touches Gmail, a feed, or Apple Mail; it just
-dims the row so you can tell what is new at a glance.
+renomail fetches your feeds and Gmail in the background, caches everything locally in
+SQLite, and renders a unified, newest-first feed you can filter, search, and read
+without leaving the terminal. Read/unread state is tracked locally and **synced back to
+the source**: marking a message read (or unread) in renomail also marks it read in Gmail
+and in Apple Mail / Mail.app, so your accounts stay in step. Feeds, which have no such
+notion, just dim the row.
 
 ## Highlights
 
 - **One feed for RSS + Gmail + Apple Mail** — items from every source interleave,
   newest first.
-- **Read-only Gmail** — the only OAuth scope requested is `gmail.readonly`; renomail
-  never modifies a mailbox.
-- **Read-only Apple Mail (macOS)** — opt in with a single flag to surface every Apple
-  Mail account's inbox straight off disk, no extra credentials; renomail only ever
-  reads a copy of Apple Mail's local index and never writes to `~/Library/Mail`.
+- **Read-state sync, nothing more** — the only OAuth scope requested is `gmail.modify`,
+  used solely to toggle the `UNREAD` label when you mark a message read/unread; renomail
+  never deletes, moves, or sends mail.
+- **Apple Mail (macOS)** — opt in with a single flag to surface every Apple Mail
+  account's inbox straight off disk, no extra credentials. renomail reads a copy of Apple
+  Mail's local index (never writing to `~/Library/Mail`); marking a message read drives
+  Mail.app via AppleScript so the change — and, for accounts like a work Gmail, the
+  server — stays in sync.
 - **Background sync** — an initial sweep on launch, then periodic re-syncs; a spinner
   and a "synced N ago · M sources" indicator live in the status bar. One failing
   source surfaces its error on the status line without blocking the others.
@@ -67,8 +71,11 @@ go build ./cmd/renomail    # produces ./renomail
    renomail auth me@gmail.com
    ```
 
-   This opens the read-only consent screen in your browser and stores a refresh
-   token; later runs are headless. RSS-only users can skip this step.
+   This opens the consent screen (the `gmail.modify` scope — read mail and toggle the
+   read/unread flag) in your browser and stores a refresh token; later runs are headless.
+   RSS-only users can skip this step. **Upgrading from an older read-only install:** re-run
+   `renomail auth <account>` once per account to grant the new scope; until you do,
+   marking read still works locally but the write-back to Gmail prompts you to re-auth.
 
 3. **Run it.**
 
@@ -97,13 +104,16 @@ go build ./cmd/renomail    # produces ./renomail
 | `?`            | toggle full help                                  |
 | `q` / `Ctrl+C` | quit                                              |
 
-## Apple Mail (macOS, read-only)
+## Apple Mail (macOS)
 
 On macOS, renomail can fold your Apple Mail (Mail.app) accounts into the same feed.
 It reads a private copy of Apple Mail's local index — no IMAP setup, no credentials —
 and lists each account's **Inbox**. Bodies are loaded on demand from the local message
 files, and each item carries a `message://` link that opens it in Mail.app. renomail
-never writes to `~/Library/Mail`.
+never writes to `~/Library/Mail`; marking a message read instead drives Mail.app via
+AppleScript (`osascript`), which sets the message's read status — launching Mail.app if
+it isn't already running, and for an account such as a work Gmail, propagating to the
+server on Mail's next sync.
 
 Enable it with a single flag (all discovered accounts are included):
 

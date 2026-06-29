@@ -8,15 +8,18 @@ terminal app that presents a **unified, continuously-updating feed** blending
 imported via OPML), all in one scrollable list. The user can filter the feed,
 mark items read/unread, and open an item to read its full content.
 
-This is a **reader**, not a full mail/RSS client: we pull and display content
-only. Read/unread is tracked **locally** — we never write state back to Gmail or
-the feeds. This document is the blueprint for the first version.
+This is a **reader**, not a full mail/RSS client: we pull and display content, and the
+only thing we ever write back is the **read/unread bit**. Marking a message read in
+renomail toggles Gmail's `UNREAD` label (via `gmail.modify`) and sets the message's read
+status in Apple Mail / Mail.app (via AppleScript); we never delete, move, or send. Feeds
+have no such notion, so their read state stays purely local. This document is the
+blueprint for the first version.
 
 ### Confirmed decisions
 
 | Area | Decision |
 |------|----------|
-| Email access | **Gmail API + OAuth2**, `gmail.readonly` scope, per-account browser flow |
+| Email access | **Gmail API + OAuth2**, `gmail.modify` scope (read + toggle UNREAD only), per-account browser flow |
 | Persistence | **SQLite** caching both items *and* read/unread state (fast start, offline browse) |
 | Layout | **Full-screen unified list → drill into a full-screen reader** (Enter opens, Esc returns) |
 | Content rendering | **Rich: HTML → markdown → Glamour** styled terminal output |
@@ -32,7 +35,7 @@ the feeds. This document is the blueprint for the first version.
 | Styling | `github.com/charmbracelet/lipgloss` | Colors for read/unread, layout, status bar |
 | Markdown render | `github.com/charmbracelet/glamour` | Renders item bodies in the reader |
 | HTML → Markdown | `github.com/JohannesKaufmann/html-to-markdown/v2` | Converts email/RSS HTML before Glamour |
-| Gmail | `google.golang.org/api/gmail/v1` + `golang.org/x/oauth2`, `.../oauth2/google` | Read-only; loopback OAuth |
+| Gmail | `google.golang.org/api/gmail/v1` + `golang.org/x/oauth2`, `.../oauth2/google` | Read + UNREAD-label write (`gmail.modify`); loopback OAuth |
 | RSS/Atom | `github.com/mmcdole/gofeed` | Parses RSS, Atom, JSON feeds; conditional GET supported |
 | OPML | `github.com/gilliek/go-opml` | Import feed lists |
 | Storage | `modernc.org/sqlite` (pure-Go, cgo-free) via `database/sql` | Cross-compiles cleanly; no cgo toolchain |
@@ -60,7 +63,7 @@ renomail/
 │   │   ├── source.go           # Provider interface
 │   │   ├── gmail/              # Gmail provider + OAuth flow + MIME parsing
 │   │   ├── rss/                # gofeed provider + OPML import
-│   │   └── applemail/          # macOS local read-only Apple Mail (Envelope Index + .emlx)
+│   │   └── applemail/          # macOS local Apple Mail (Envelope Index + .emlx; AppleScript read-state write-back)
 │   ├── syncengine/             # background fetch scheduler, fan-in to UI
 │   ├── render/                 # HTML → markdown → Glamour pipeline
 │   └── ui/
@@ -103,7 +106,7 @@ type Item struct {
     NativeID   string    // provider's native id: Gmail message id / RSS guid|link
     Published  time.Time // sort key (desc)
     Fetched    time.Time
-    Read       bool      // LOCAL state only
+    Read       bool      // local flag; also synced back to the source where supported
     BodyHTML   string    // lazily populated for email; usually present for RSS
     BodyText   string    // fallback / search
 }
@@ -153,7 +156,13 @@ type Provider interface {
   Services → Credentials → Desktop app). Per-account flow opens the browser,
   user consents, code is exchanged on a `localhost` redirect. Refresh token
   persisted to `token-<account>.json` (mode `0600`) under the config dir.
-- **Scope:** `gmail.readonly` only.
+- **Scope:** `gmail.modify` — read plus the single write renomail makes: toggling the
+  `UNREAD` label. No delete/move/send capability.
+- **Read-state write-back (`SetRead`):** when an item is marked read/unread, the provider
+  calls `users.messages.batchModify` to remove/add `UNREAD` (chunked to the API's 1000-id
+  limit). Best-effort and off the UI goroutine; a 403 from a token still on the old
+  read-only scope is surfaced as an actionable "re-run `renomail auth`" message rather
+  than a hard error (reads keep working until re-auth).
 - **List fetch:** `users.messages.list` with a query
   (`in:inbox newer_than:<lookback>`, default 30d), paginated. For each id, a
   metadata `get` (`format=METADATA`, headers `From`,`Subject`,`Date` + the API
@@ -176,7 +185,7 @@ type Provider interface {
 - **Body:** typically already present; if a feed only ships summaries, `o` opens
   the permalink in a browser.
 
-### 4.3 Apple Mail provider (`source/applemail`, macOS, read-only)
+### 4.3 Apple Mail provider (`source/applemail`, macOS)
 
 - **No auth.** Reads Apple Mail's (Mail.app) local store directly. Gated by a single
   `[apple_mail] enabled = true` flag; when on, **all** accounts are discovered and one
@@ -188,6 +197,12 @@ type Provider interface {
 - **Safe read:** to avoid contending with a running Mail.app and to never write to
   `~/Library/Mail`, each fetch copies the index (plus any `-wal`/`-shm`) to a private
   temp file and opens that copy read-only (`query_only`), then deletes it.
+- **Read-state write-back (`SetRead`):** the on-disk index is never written. Instead,
+  marking a message read drives Mail.app via AppleScript (`osascript`), setting the
+  message's `read status` matched by its Message-ID. Injection-safe (ids passed as argv,
+  not interpolated); launches Mail.app if needed; for a Gmail-backed account the change
+  propagates to the server on Mail's next sync. `rowid:`-only items (no Message-ID) are
+  skipped.
 - **Account discovery:** distinct accounts that own an INBOX mailbox (parsed from the
   `mailboxes.url`); display name resolved best-effort (Sent-mailbox sender → top INBOX
   recipient → short-UUID fallback).
@@ -348,7 +363,7 @@ account = "work@gmail.com"
 [[opml]]
 path = "~/feeds.opml"      # may list several; or use [[feed]] for one-offs
 
-[apple_mail]               # optional, macOS: local read-only Apple Mail (§4.3)
+[apple_mail]               # optional, macOS: local Apple Mail (read + AppleScript read-state write-back, §4.3)
 enabled = true             # one flag → all accounts' inboxes
 
 [slack]                    # optional: per-sweep Slack webhook digest
@@ -395,7 +410,9 @@ sweep and both best-effort (failures surface on the status line, never crash):
 ## 10. Security & Robustness
 
 - OAuth tokens and `credentials.json` stored `0600`; optional OS keychain via
-  `go-keyring`. Read-only Gmail scope — no destructive capability.
+  `go-keyring`. `gmail.modify` scope is the narrowest that allows toggling the read flag;
+  no delete/move/send capability. Apple Mail write-back goes through AppleScript with
+  message ids passed as argv (never interpolated), so a crafted Message-ID cannot inject.
 - All SQL parameterized (no string interpolation).
 - HTML sanitized during markdown conversion (scripts/styles dropped) before
   terminal rendering.

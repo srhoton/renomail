@@ -59,7 +59,7 @@ type Item struct {
 	NativeID   string    // provider's native id: Gmail message id / RSS guid|link
 	Published  time.Time // sort key (desc)
 	Fetched    time.Time // when this item was last fetched
-	Read       bool      // LOCAL state only; never synced back to the source
+	Read       bool      // local read flag; also synced back to the source (Gmail/Apple Mail) when it supports it
 	BodyHTML   string    // lazily populated for email; usually present for RSS
 	BodyText   string    // fallback / search
 }
