@@ -1,0 +1,34 @@
+Session prompts (macOS unread-threshold notification feature)
+
+1. (plan mode) "Ok, so I have a new bit of functionality I would like you to
+   plan out. When there are more than 20 rss items or 2 emails unread, I would
+   like you to send a notification through the macos notification system (in
+   case I'm not working in tmux at the time). It should only fire once, and the
+   functionality should be enabled by boolean flag in the config, which is on
+   by default."
+
+   Planned non-interactively (per the global "assume & note, don't ask" rule):
+   - "fire once" = edge-triggered per-kind latch, re-arming when the unread
+     count drops back to/under the threshold.
+   - thresholds strict greater-than (>20 RSS, >2 email), as engine constants.
+   - initial backfill sweep skipped (a standing backlog announces on the first
+     periodic sweep of a session).
+   - banner fires regardless of $TMUX; gated only by the config bool + darwin.
+   ExitPlanMode approved; implemented the plan.
+
+2. "/review" — ran the four-reviewer pass (functional, code-quality, ADR,
+   performance). Result: zero CRITICAL/HIGH. Functional APPROVED, quality PASS,
+   performance PASS, ADR N/A. Proactively fixed two LOW items: the banner no
+   longer prints "renomail" twice (dropped the redundant body prefix; the
+   notifier title already carries the brand), and added an exactly-at-threshold
+   no-fire boundary test. Left the other LOWs (non-index-only COUNT, postAlert/
+   postDigest duplication, digestWG rename, pre-existing naming) as noted.
+
+3. "/trueup" — "ok. Please commit your work, add prompts in this session to the
+   commit via git notes, push it, and using your github cli tool, create a PR.
+   Make sure the README for the PR accurately describes the changes made from a
+   full diff from the branch you are merging into."
+
+   Note: PR #20 (read/unread write-back) merged to main during the session, so
+   the branch was fast-forwarded onto the merge commit before committing, making
+   the PR diff exactly the macOS-notification changes vs main.
