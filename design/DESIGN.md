@@ -371,12 +371,14 @@ webhook_url = "https://hooks.slack.com/services/T/B/X"
 max_items   = 10
 ```
 
-`tmux_notifications` (bool, default on) gates the tmux status-line ping. The
-`[apple_mail]` table (pointer, absent = off) opts in the local Apple Mail source
-(§4.3); on macOS it needs Full Disk Access. The
+`tmux_notifications` (bool, default on) gates the tmux status-line ping;
+`macos_notifications` (bool, default on, macOS only) gates the unread-threshold
+Notification Center banner (§9.1). The `[apple_mail]` table (pointer, absent = off)
+opts in the local Apple Mail source (§4.3); on macOS it needs Full Disk Access. The
 `[slack]` table configures the Slack digest (§9); its `webhook_url` may instead be
 supplied via `RENOMAIL_SLACK_WEBHOOK`, which takes precedence and keeps the secret
-off disk. Both are resolved in the cmd layer so `config`/`ui` stay env-free.
+off disk. All are resolved in the cmd layer so `config`/`ui` stay env-free (the macOS
+banner is also `runtime.GOOS`-gated there so the off-darwin stub is never wired).
 
 ---
 
@@ -393,8 +395,8 @@ off disk. Both are resolved in the cmd layer so `config`/`ui` stay env-free.
 
 ### 9.1 Notifications
 
-Two independent "new items arrived" channels, both skipping the initial backfill
-sweep and both best-effort (failures surface on the status line, never crash):
+Three independent notification channels, all skipping the initial backfill sweep and
+all best-effort (failures surface on the status line, never crash):
 
 - **tmux** (`notify.Tmux`): the UI fires one status-line ping per source that gained
   items, gated on `$TMUX` and `tmux_notifications`.
@@ -404,6 +406,16 @@ sweep and both best-effort (failures surface on the status line, never crash):
   every source's new items into one Block Kit digest and posts it via an injected
   `DigestFunc` under a bounded timeout. A post failure rides back as a synthetic
   `Result{SourceName:"Slack", Err}` so the existing UI error path renders it.
+- **macOS** (`notify.MacOS`, macOS only): also engine-owned, but threshold-driven on
+  *total unread* rather than this sweep's new items. After each non-initial sweep
+  `maybeAlert` counts unread items per kind via `store.Count` and, if a kind newly
+  crosses its threshold (> 20 unread RSS or > 2 unread emails), posts a Notification
+  Center banner via an injected `AlertFunc` (osascript `display notification`, with the
+  title/body passed as argv — never interpolated — under a bounded timeout). An
+  edge-triggered latch per kind makes it fire **once per crossing** and re-arm only when
+  the count falls back to/under the threshold, so a standing backlog does not re-nag;
+  both kinds crossing in one sweep share a single combined banner. A post failure rides
+  back as a synthetic `Result{SourceName:"macOS", Err}`.
 
 ---
 

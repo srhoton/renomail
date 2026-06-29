@@ -40,6 +40,12 @@ type Config struct {
 	// an explicit `tmux_notifications = false`.
 	TmuxNotifications *bool `toml:"tmux_notifications"`
 
+	// MacNotifications opts out of the macOS Notification Center banner posted when
+	// unread counts cross a threshold during a background sync (macOS only). Like
+	// TmuxNotifications it is a pointer so an absent key (default = enabled) is
+	// distinct from an explicit `macos_notifications = false`.
+	MacNotifications *bool `toml:"macos_notifications"`
+
 	// Slack configures a Slack incoming-webhook digest posted once per sync sweep
 	// that finds new items. It is a pointer so an absent [slack] table leaves Slack
 	// disabled. The webhook URL may instead come from the RENOMAIL_SLACK_WEBHOOK
@@ -180,6 +186,13 @@ func (c Config) LookbackDuration() (time.Duration, error) {
 // caller still gates on actually running inside tmux ($TMUX set).
 func (c Config) NotifyEnabled() bool {
 	return c.TmuxNotifications == nil || *c.TmuxNotifications
+}
+
+// MacNotifyEnabled reports whether macOS Notification Center alerts are on. They
+// default to on; only an explicit `macos_notifications = false` in the config
+// disables them. The caller still gates on actually running on macOS.
+func (c Config) MacNotifyEnabled() bool {
+	return c.MacNotifications == nil || *c.MacNotifications
 }
 
 // SlackMaxItems returns the configured digest item-line cap, falling back to the

@@ -12,6 +12,7 @@ individual keys fall back to their defaults.
 | `sync_interval`      | string | `"5m"`  | How often the background engine re-syncs every source.             |
 | `lookback`           | string | `"30d"` | How far back the **first** Gmail sweep looks (the cold-start window). |
 | `tmux_notifications` | bool   | `true`  | When running inside tmux, post a status-line message as new items arrive. Set `false` to disable. Has no effect outside tmux. |
+| `macos_notifications`| bool   | `true`  | On macOS, post a Notification Center banner when unread counts cross a threshold (> 20 unread RSS items or > 2 unread emails). Set `false` to disable. Has no effect off macOS. |
 
 After the first sync each source advances its own `LastSync`, so steady-state
 syncs only fetch what is new; `lookback` bounds only that initial scan.
@@ -141,12 +142,29 @@ webhook_url = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX"
 max_items   = 10
 ```
 
+## macOS notifications — `macos_notifications`
+
+On macOS, renomail posts a Notification Center banner titled "renomail" when the
+backlog of **unread** items crosses a threshold during a background sync — **more than
+20 unread RSS items** or **more than 2 unread emails** — so a build-up surfaces on the
+desktop even when you are away from tmux. It fires **once per crossing**: a kind that is
+over its threshold does not re-notify on every sweep, and re-arms only after its unread
+count drops back to/under the threshold. Email and RSS cross independently, but a sweep
+where both cross emits a single combined banner. The initial backfill sweep on launch is
+never bannered (a standing backlog is announced on the first periodic sweep of a
+session). On by default; set `macos_notifications = false` to disable. No effect off
+macOS.
+
+> The first banner may require granting Notification permission to the script runner in
+> **System Settings → Notifications**.
+
 ## Complete example
 
 ```toml
-sync_interval      = "10m"
-lookback           = "14d"
-tmux_notifications = true
+sync_interval       = "10m"
+lookback            = "14d"
+tmux_notifications  = true
+macos_notifications = true
 
 [[gmail]]
 account = "me@gmail.com"

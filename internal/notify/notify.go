@@ -1,11 +1,13 @@
-// Package notify delivers "new items arrived" notifications out of band. It offers
-// two independent channels: Tmux surfaces a transient message on the host tmux
-// status line (local, per-source, fired by the UI), and Slack posts a coalesced,
-// richly formatted digest to a Slack incoming webhook (remote, per-sweep, fired by
-// the sync engine). Both are optional and best-effort: a delivery failure is
-// returned to the caller to surface rather than crashing. The package keeps its
-// dependencies minimal (os/exec for tmux; net/http + encoding/json for Slack) so it
-// stays reusable and trivially testable.
+// Package notify delivers notifications out of band. It offers three independent
+// channels: Tmux surfaces a transient "new items arrived" message on the host tmux
+// status line (local, per-source, fired by the UI); Slack posts a coalesced, richly
+// formatted digest of a sweep's new items to a Slack incoming webhook (remote,
+// per-sweep, fired by the sync engine); and MacOS posts a Notification Center banner
+// when unread counts cross a threshold (local, macOS-only, fired by the sync engine).
+// All are optional and best-effort: a delivery failure is returned to the caller to
+// surface rather than crashing. The package keeps its dependencies minimal (os/exec
+// for tmux and osascript; net/http + encoding/json for Slack) so it stays reusable and
+// trivially testable.
 package notify
 
 import "os/exec"

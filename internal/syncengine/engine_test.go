@@ -3,8 +3,10 @@ package syncengine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -563,5 +565,254 @@ func TestSyncAll_noDigestWhenNotInstalled(t *testing.T) {
 	case extra := <-e.Events():
 		t.Errorf("unexpected extra Result: %+v", extra)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// alertRecorder is an AlertFunc that records the messages it receives and returns a
+// configurable error. Its fields are mutex-guarded because the engine posts the
+// threshold alert from a separate goroutine; notified signals each invocation so a
+// test can wait for the async post.
+type alertRecorder struct {
+	mu       sync.Mutex
+	msgs     []string
+	err      error
+	notified chan struct{}
+}
+
+func newAlertRecorder(err error) *alertRecorder {
+	return &alertRecorder{err: err, notified: make(chan struct{}, 8)}
+}
+
+func (a *alertRecorder) notify(_ context.Context, msg string) error {
+	a.mu.Lock()
+	a.msgs = append(a.msgs, msg)
+	err := a.err
+	a.mu.Unlock()
+	select {
+	case a.notified <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+func (a *alertRecorder) snapshot() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.msgs)
+}
+
+func (a *alertRecorder) waitNotified(t *testing.T) {
+	t.Helper()
+	select {
+	case <-a.notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("threshold alert was not posted")
+	}
+}
+
+// seedUnread inserts n unread items of the given kind into the store so the engine's
+// threshold counts can be driven directly, independent of any provider.
+func seedUnread(t *testing.T, st *store.Store, kind model.Kind, prefix string, n int) {
+	t.Helper()
+	now := time.Now().UTC()
+	items := make([]model.Item, 0, n)
+	for i := range n {
+		native := fmt.Sprintf("%s-%s-%d", kind, prefix, i)
+		items = append(items, model.Item{
+			ID:         model.StableID(string(kind), native),
+			Kind:       kind,
+			SourceID:   string(kind),
+			SourceName: string(kind),
+			NativeID:   native,
+			Published:  now.Add(-time.Duration(i) * time.Minute),
+		})
+	}
+	if _, err := st.UpsertItems(context.Background(), items); err != nil {
+		t.Fatalf("seed %s items: %v", kind, err)
+	}
+}
+
+// newAlertEngine builds an engine with no providers (so syncAll exercises only the
+// threshold path), the recorder installed, and low thresholds so a handful of seeded
+// items crosses them.
+func newAlertEngine(t *testing.T, st *store.Store, rec *alertRecorder) *Engine {
+	t.Helper()
+	e := New([]source.Provider{}, st, time.Hour)
+	e.SetThresholdNotifier(rec.notify)
+	e.emailThresh = 2
+	e.rssThresh = 2
+	return e
+}
+
+func TestSetThresholdNotifier_defaultsThresholds(t *testing.T) {
+	st := newTestStore(t)
+	e := New([]source.Provider{}, st, time.Hour)
+	e.SetThresholdNotifier(func(context.Context, string) error { return nil })
+	if e.emailThresh != defaultUnreadEmailThreshold || e.rssThresh != defaultUnreadRSSThreshold {
+		t.Errorf("thresholds = (%d, %d), want defaults (%d, %d)",
+			e.emailThresh, e.rssThresh, defaultUnreadEmailThreshold, defaultUnreadRSSThreshold)
+	}
+}
+
+func TestMaybeAlert_firesOnceOnCrossing(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	rec := newAlertRecorder(nil)
+	e := newAlertEngine(t, st, rec)
+
+	seedUnread(t, st, model.KindEmail, "a", 3) // 3 > emailThresh(2)
+
+	// First steady-state sweep crosses the threshold and fires once.
+	e.syncAll(ctx, false)
+	rec.waitNotified(t)
+
+	// A second sweep with the count still over must not refire (latched).
+	e.syncAll(ctx, false)
+	select {
+	case <-rec.notified:
+		t.Fatal("threshold alert refired while still latched over the threshold")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	msgs := rec.snapshot()
+	if len(msgs) != 1 {
+		t.Fatalf("alert messages = %d, want exactly 1", len(msgs))
+	}
+	if !strings.Contains(msgs[0], "3 unread emails") {
+		t.Errorf("alert message = %q, want it to mention 3 unread emails", msgs[0])
+	}
+}
+
+func TestMaybeAlert_reArmsAfterDroppingBelow(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	rec := newAlertRecorder(nil)
+	e := newAlertEngine(t, st, rec)
+
+	seedUnread(t, st, model.KindEmail, "a", 3)
+	e.syncAll(ctx, false)
+	rec.waitNotified(t) // fire 1
+
+	// Drop back under the threshold: the next sweep fires nothing but re-arms the latch.
+	if err := st.MarkAllRead(ctx, model.Filter{}); err != nil {
+		t.Fatalf("MarkAllRead: %v", err)
+	}
+	e.syncAll(ctx, false)
+	select {
+	case <-rec.notified:
+		t.Fatal("threshold alert fired while under the threshold")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Cross again with fresh unread items: the re-armed latch fires a second time.
+	seedUnread(t, st, model.KindEmail, "b", 3)
+	e.syncAll(ctx, false)
+	rec.waitNotified(t) // fire 2
+
+	if msgs := rec.snapshot(); len(msgs) != 2 {
+		t.Fatalf("alert messages = %d, want 2 (one per crossing)", len(msgs))
+	}
+}
+
+func TestMaybeAlert_exactlyAtThresholdDoesNotFire(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	rec := newAlertRecorder(nil)
+	e := newAlertEngine(t, st, rec) // emailThresh = 2
+
+	// Exactly at the threshold (2 unread, threshold 2) must NOT fire — the rule is
+	// strictly greater-than. This pins the off-by-one boundary.
+	seedUnread(t, st, model.KindEmail, "a", 2)
+
+	e.syncAll(ctx, false)
+	select {
+	case <-rec.notified:
+		t.Fatal("threshold alert fired at exactly the threshold; rule is strict >")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if msgs := rec.snapshot(); len(msgs) != 0 {
+		t.Errorf("alert messages at threshold = %d, want 0", len(msgs))
+	}
+}
+
+func TestMaybeAlert_skippedOnInitialSweep(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	rec := newAlertRecorder(nil)
+	e := newAlertEngine(t, st, rec)
+
+	seedUnread(t, st, model.KindEmail, "a", 3) // over threshold
+
+	// The initial backfill sweep must never fire, even with a standing backlog.
+	e.syncAll(ctx, true)
+	select {
+	case <-rec.notified:
+		t.Fatal("threshold alert must be skipped on the initial sweep")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if msgs := rec.snapshot(); len(msgs) != 0 {
+		t.Errorf("alert messages on initial sweep = %d, want 0", len(msgs))
+	}
+}
+
+func TestMaybeAlert_independentKindsCombineIntoOneMessage(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	rec := newAlertRecorder(nil)
+	e := newAlertEngine(t, st, rec)
+
+	seedUnread(t, st, model.KindEmail, "a", 3) // > emailThresh(2)
+	seedUnread(t, st, model.KindRSS, "a", 3)   // > rssThresh(2)
+
+	e.syncAll(ctx, false)
+	rec.waitNotified(t)
+
+	msgs := rec.snapshot()
+	if len(msgs) != 1 {
+		t.Fatalf("alert messages = %d, want exactly 1 combined message", len(msgs))
+	}
+	if !strings.Contains(msgs[0], "unread emails") || !strings.Contains(msgs[0], "unread RSS items") {
+		t.Errorf("combined message = %q, want both kinds mentioned", msgs[0])
+	}
+}
+
+func TestMaybeAlert_noNotifierIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	// No notifier installed: a steady-state sweep over the threshold must do nothing
+	// (and, with no providers, emit no Results at all).
+	seedUnread(t, st, model.KindEmail, "a", 50)
+	e := New([]source.Provider{}, st, time.Hour)
+
+	e.syncAll(ctx, false)
+	select {
+	case extra := <-e.Events():
+		t.Errorf("unexpected Result with no notifier installed: %+v", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestMaybeAlert_errorSurfacedAsResult(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	boom := errors.New("osascript: not permitted")
+	rec := newAlertRecorder(boom)
+	e := newAlertEngine(t, st, rec)
+
+	seedUnread(t, st, model.KindEmail, "a", 3)
+
+	e.syncAll(ctx, false)
+	// The failed alert surfaces as a macOS Result on the events channel.
+	select {
+	case r := <-e.Events():
+		if r.SourceName != "macOS" {
+			t.Fatalf("Result SourceName = %q, want macOS", r.SourceName)
+		}
+		if !errors.Is(r.Err, boom) {
+			t.Errorf("Result err = %v, want %v", r.Err, boom)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("threshold alert error was not surfaced as a Result")
 	}
 }
