@@ -289,6 +289,21 @@ func (s *Store) Query(ctx context.Context, f model.Filter) ([]model.Item, error)
 	return items, nil
 }
 
+// Count returns how many items match f, using the same predicate as Query but
+// without materializing the rows. A zero Filter counts every item.
+func (s *Store) Count(ctx context.Context, f model.Filter) (int, error) {
+	clause, args := buildWhere(f)
+	q := "SELECT COUNT(*) FROM items"
+	if clause != "" {
+		q += " WHERE " + clause
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count items: %w", err)
+	}
+	return n, nil
+}
+
 // SetRead sets the local read flag for a single item.
 func (s *Store) SetRead(ctx context.Context, id string, read bool) error {
 	if _, err := s.db.ExecContext(ctx,

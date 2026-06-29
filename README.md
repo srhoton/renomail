@@ -134,9 +134,9 @@ while the native **Read-only Gmail** integration handles Gmail.
 
 ## Notifications
 
-renomail offers two independent "new items arrived" channels. Both skip the initial
-sweep on launch (so a first run does not announce its whole backfill) and both are
-best-effort — a delivery failure shows on the status line, never crashing the app.
+renomail offers three independent notification channels. All skip the initial sweep on
+launch (so a first run does not announce its whole backfill) and all are best-effort —
+a delivery failure shows on the status line, never crashing the app.
 
 ### tmux
 
@@ -170,6 +170,26 @@ max_items   = 10   # optional; item lines per digest before "…and N more"
 To keep the secret out of the config file, set `RENOMAIL_SLACK_WEBHOOK` instead — it
 takes precedence over `webhook_url`. Slack is disabled when neither is set. See
 [docs/CONFIG.md](docs/CONFIG.md#slack-notifications--slack) for details.
+
+### macOS
+
+On macOS, renomail posts a Notification Center banner when the **unread** backlog
+crosses a threshold during a background sync — **more than 20 unread RSS items** or
+**more than 2 unread emails** — so a build-up reaches your desktop even when you are not
+looking at tmux. Unlike the tmux/Slack channels (which announce *new* arrivals), this
+one watches *total unread* and fires **once per crossing**: it does not re-nag every
+sweep, and re-arms only after the count drops back under the threshold. Email and RSS
+cross independently but share a single combined banner when both trip in one sweep.
+
+This is on by default on macOS. To turn it off, add to your `config.toml`:
+
+```toml
+macos_notifications = false
+```
+
+The first banner may require granting Notification permission to the script runner in
+**System Settings → Notifications**. See
+[docs/CONFIG.md](docs/CONFIG.md#macos-notifications--macos_notifications) for details.
 
 ## Subcommands
 

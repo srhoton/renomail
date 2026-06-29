@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -102,6 +103,13 @@ func buildTUI(ctx context.Context, cfg config.Config, paths config.Paths) (ui.Mo
 			return ui.Model{}, nil, nil, fmt.Errorf("slack webhook must be an https URL")
 		}
 		eng.SetDigestNotifier(notify.NewSlack(webhook, cfg.SlackMaxItems()).Notify)
+	}
+	// On macOS, post a Notification Center banner when unread counts cross a threshold,
+	// so a backlog surfaces on the desktop even outside tmux. On by default; the
+	// runtime.GOOS gate keeps the off-darwin stub (which returns ErrUnsupported) from
+	// ever being wired in.
+	if cfg.MacNotifyEnabled() && runtime.GOOS == "darwin" {
+		eng.SetThresholdNotifier(notify.MacOS)
 	}
 	return m, st, eng, nil
 }

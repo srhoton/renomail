@@ -75,6 +75,54 @@ func TestQuery_ordersByPublishedDescending(t *testing.T) {
 	}
 }
 
+func TestCount_byKindAndReadState(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	mailRead := newItem("m-read", "gmail", model.KindEmail, 100)
+	mailRead.Read = true
+	mailUnread1 := newItem("m-u1", "gmail", model.KindEmail, 200)
+	mailUnread2 := newItem("m-u2", "gmail", model.KindEmail, 300)
+	rssUnread := newItem("r-u1", "feed", model.KindRSS, 400)
+	if _, err := s.UpsertItems(ctx, []model.Item{mailRead, mailUnread1, mailUnread2, rssUnread}); err != nil {
+		t.Fatalf("UpsertItems: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		filter model.Filter
+		want   int
+	}{
+		{name: "all items", filter: model.Filter{}, want: 4},
+		{
+			name:   "unread emails",
+			filter: model.Filter{Kinds: map[model.Kind]bool{model.KindEmail: true}, Read: model.ReadUnreadOnly},
+			want:   2,
+		},
+		{
+			name:   "unread rss",
+			filter: model.Filter{Kinds: map[model.Kind]bool{model.KindRSS: true}, Read: model.ReadUnreadOnly},
+			want:   1,
+		},
+		{
+			name:   "read emails",
+			filter: model.Filter{Kinds: map[model.Kind]bool{model.KindEmail: true}, Read: model.ReadReadOnly},
+			want:   1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := s.Count(ctx, tt.filter)
+			if err != nil {
+				t.Fatalf("Count: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Count(%+v) = %d, want %d", tt.filter, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestQuery_roundTripsAllFields(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

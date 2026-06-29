@@ -8,6 +8,8 @@ package syncengine
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +51,27 @@ type DigestFunc func(ctx context.Context, newItems []model.Item) error
 // digestTimeout bounds a single digest post so a hung webhook cannot run forever.
 const digestTimeout = 15 * time.Second
 
+// AlertFunc posts a single threshold notification (e.g. the macOS Notification
+// Center banner) carrying a prebuilt message. It is injected via
+// SetThresholdNotifier; a nil alert disables it. The engine evaluates the unread
+// thresholds at the end of each steady-state sweep — never on the initial backfill
+// sweep — and calls AlertFunc only when a kind newly crosses its threshold. It runs
+// in its own goroutine (tracked by digestWG) so a slow notifier never stalls the
+// engine's tick/trigger loop; a returned error is surfaced to the UI (as a Result
+// with Err) rather than crashing the sweep.
+type AlertFunc func(ctx context.Context, msg string) error
+
+// alertTimeout bounds a single threshold-alert post so a hung osascript (e.g. a
+// Notification permission prompt) cannot run forever.
+const alertTimeout = 10 * time.Second
+
+// Default unread thresholds above which a macOS banner fires. "More than 20 unread
+// RSS items or more than 2 unread emails" — strict greater-than.
+const (
+	defaultUnreadEmailThreshold = 2
+	defaultUnreadRSSThreshold   = 20
+)
+
 // Engine fetches every provider on an interval and emits one Result per provider
 // per sweep on its events channel.
 type Engine struct {
@@ -59,7 +82,18 @@ type Engine struct {
 	out       chan Result
 	trigger   chan struct{}
 	digest    DigestFunc     // nil unless a per-sweep digest notifier is installed
-	digestWG  sync.WaitGroup // tracks in-flight digest posts so Run drains them before closing out
+	digestWG  sync.WaitGroup // tracks in-flight digest and threshold-alert posts so Run drains them before closing out
+
+	// Threshold-alert state. alert is nil unless a notifier is installed; the
+	// thresholds default from SetThresholdNotifier. The latches are edge-trigger
+	// guards: a kind fires once when it crosses its threshold and re-arms only after
+	// the count drops back to/under it. They are read and written solely on the Run
+	// goroutine (in syncAll), so they need no synchronization.
+	alert        AlertFunc
+	emailThresh  int
+	rssThresh    int
+	emailLatched bool
+	rssLatched   bool
 }
 
 // New builds an Engine over the provider set, store, and re-sync interval. The
@@ -96,6 +130,20 @@ func (e *Engine) Events() <-chan Result { return e.out }
 // digest). It must be called before Run starts the engine goroutine; passing nil
 // leaves the digest disabled. See DigestFunc for the calling contract.
 func (e *Engine) SetDigestNotifier(fn DigestFunc) { e.digest = fn }
+
+// SetThresholdNotifier installs the unread-threshold notifier (e.g. the macOS
+// Notification Center banner) and defaults any unset thresholds. It must be called
+// before Run starts the engine goroutine; passing nil leaves threshold alerts
+// disabled. See AlertFunc for the calling contract.
+func (e *Engine) SetThresholdNotifier(fn AlertFunc) {
+	e.alert = fn
+	if e.emailThresh <= 0 {
+		e.emailThresh = defaultUnreadEmailThreshold
+	}
+	if e.rssThresh <= 0 {
+		e.rssThresh = defaultUnreadRSSThreshold
+	}
+}
 
 // Run performs an immediate first sweep, then re-syncs on the interval — or
 // whenever Trigger requests an out-of-band sweep — until the context is cancelled,
@@ -197,6 +245,81 @@ func (e *Engine) syncAll(ctx context.Context, initial bool) {
 			defer e.digestWG.Done()
 			e.postDigest(ctx, newAll)
 		}()
+	}
+
+	e.maybeAlert(ctx, initial)
+}
+
+// maybeAlert evaluates the unread-count thresholds after a sweep and fires the
+// installed notifier once when a kind crosses its threshold. The initial backfill
+// sweep is skipped so a first run does not banner mid-load; a standing backlog is
+// then announced on the first steady-state sweep of the session. Each kind latches
+// independently — it fires on the below→over transition and re-arms only after the
+// count falls back to/under the threshold — so a persistent backlog does not re-nag
+// every sweep. Counting is best-effort: a query error is swallowed (the next sweep
+// retries) rather than crashing the engine.
+func (e *Engine) maybeAlert(ctx context.Context, initial bool) {
+	if e.alert == nil || initial {
+		return
+	}
+	emailUnread, err := e.store.Count(ctx, model.Filter{
+		Kinds: map[model.Kind]bool{model.KindEmail: true}, Read: model.ReadUnreadOnly,
+	})
+	if err != nil {
+		return
+	}
+	rssUnread, err := e.store.Count(ctx, model.Filter{
+		Kinds: map[model.Kind]bool{model.KindRSS: true}, Read: model.ReadUnreadOnly,
+	})
+	if err != nil {
+		return
+	}
+
+	emailOver := emailUnread > e.emailThresh
+	rssOver := rssUnread > e.rssThresh
+	var parts []string
+	if emailOver && !e.emailLatched {
+		parts = append(parts, fmt.Sprintf("%d unread emails", emailUnread))
+	}
+	if rssOver && !e.rssLatched {
+		parts = append(parts, fmt.Sprintf("%d unread RSS items", rssUnread))
+	}
+	e.emailLatched = emailOver
+	e.rssLatched = rssOver
+	if len(parts) == 0 {
+		return
+	}
+
+	// The notifier supplies the "renomail" title, so the message is just the body.
+	msg := strings.Join(parts, ", ")
+	// Post asynchronously (bounded by alertTimeout) so a hung osascript never delays
+	// the next tick/trigger. digestWG lets Run wait for the post before closing out.
+	e.digestWG.Add(1)
+	go func() {
+		defer e.digestWG.Done()
+		e.postAlert(ctx, msg)
+	}()
+}
+
+// postAlert delivers a prebuilt threshold message to the injected notifier under a
+// bounded timeout. A failure is surfaced to the UI as a Result with Err (rendered on
+// the status line) rather than crashing the sweep; if the consumer is already gone
+// the error is dropped. It is a no-op once the context is cancelled, so a shutdown
+// does not emit spurious "context canceled" alert errors.
+func (e *Engine) postAlert(ctx context.Context, msg string) {
+	if ctx.Err() != nil {
+		return
+	}
+	actx, cancel := context.WithTimeout(ctx, alertTimeout)
+	defer cancel()
+	if err := e.alert(actx, msg); err != nil {
+		if ctx.Err() != nil {
+			return // cancelled mid-post: shutdown noise, not a real delivery failure
+		}
+		select {
+		case e.out <- Result{SourceName: "macOS", Err: err}:
+		case <-ctx.Done():
+		}
 	}
 }
 
