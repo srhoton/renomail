@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,6 +55,11 @@ var errNoMailData = errors.New("apple mail: no local data found")
 // non-positive, so a first sweep never tries to read from the epoch.
 const defaultLookback = 30 * 24 * time.Hour
 
+// markReadBatchSize caps how many message ids SetRead passes to one osascript
+// invocation, so a large Mark All Read stays well under the OS argv length limit and
+// each AppleScript run does a bounded amount of work.
+const markReadBatchSize = 200
+
 // Account is a discovered Apple Mail account: its Mail-internal UUID (stable, taken
 // from the mailbox URL) and a best-effort display name (the account's own email
 // when resolvable, else a short label).
@@ -73,8 +79,12 @@ type Provider struct {
 	lookback time.Duration
 }
 
-// Compile-time assertion that Provider satisfies the source contract.
-var _ source.Provider = (*Provider)(nil)
+// Compile-time assertions that Provider satisfies the read contract and the optional
+// write-back contract (SetRead reflects read state into Mail.app via AppleScript).
+var (
+	_ source.Provider   = (*Provider)(nil)
+	_ source.ReadSyncer = (*Provider)(nil)
+)
 
 // mailRoot resolves the Apple Mail data root. It is a package var (not a direct
 // call) so tests can point Discover at a fixture tree without touching the real
@@ -246,6 +256,61 @@ func (p *Provider) resolveRowID(ctx context.Context, nativeID string) (rowid int
 		return 0, "", false, nil
 	}
 	return rowid, mailboxURL, found, err
+}
+
+// SetRead reflects the read flag for the given messages in Mail.app via AppleScript
+// (osascript) — the only safe write path, since renomail otherwise reads an immutable
+// snapshot of the live Envelope Index and never writes to ~/Library/Mail. nativeIDs are
+// Item.NativeIDs: RFC-822 Message-IDs, matched against Mail's `message id`; a "rowid:"
+// fallback id has no header to match and is skipped (best-effort). For a
+// Gmail-via-Apple-Mail account, setting the local read status propagates to the server
+// on Mail's next sync. It requires (and osascript may launch) Mail.app, and returns
+// ErrUnsupported off macOS.
+func (p *Provider) SetRead(ctx context.Context, nativeIDs []string, read bool) error {
+	msgIDs := messageIDsForMail(nativeIDs)
+	if len(msgIDs) == 0 {
+		return nil
+	}
+	// Chunk so a large Mark All Read never passes every id in one argv vector (which can
+	// exceed the OS ARG_MAX) and each osascript invocation stays bounded. ctx's deadline
+	// is the whole-call budget shared across chunks, so an unusually large batch may sync
+	// only a prefix before the deadline — acceptable under the best-effort contract (the
+	// local read state is already authoritative).
+	for chunk := range slices.Chunk(msgIDs, markReadBatchSize) {
+		if err := markReadInMail(ctx, chunk, read); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// messageIDsForMail extracts the bare RFC-822 Message-IDs (angle brackets stripped)
+// usable as Mail.app's `message id`, dropping blank and "rowid:" fallback native ids
+// that carry no header Mail can match on.
+func messageIDsForMail(nativeIDs []string) []string {
+	out := make([]string, 0, len(nativeIDs))
+	for _, id := range nativeIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || strings.HasPrefix(id, "rowid:") {
+			continue
+		}
+		id = strings.TrimSuffix(strings.TrimPrefix(id, "<"), ">")
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// osascriptArgs assembles the argument vector for `osascript -` that sets read status
+// in Mail.app: "-" (read the script from stdin) followed by the desired read status and
+// each message id, so the ids travel as argv data the script reads via `on run argv` —
+// never interpolated into the script body, which makes an adversarial Message-ID unable
+// to inject AppleScript. msgIDs are bare Message-IDs (no angle brackets).
+func osascriptArgs(msgIDs []string, read bool) []string {
+	args := make([]string, 0, len(msgIDs)+2)
+	args = append(args, "-", strconv.FormatBool(read))
+	return append(args, msgIDs...)
 }
 
 // withIndex runs fn against a private, read-only snapshot of Apple Mail's Envelope

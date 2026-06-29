@@ -28,6 +28,20 @@ type Provider interface {
 	Body(ctx context.Context, item *model.Item) error
 }
 
+// ReadSyncer is implemented by providers that can reflect a local read-state change
+// back to the originating account: Gmail toggles the UNREAD label via the API, Apple
+// Mail sets a message's read status in Mail.app via AppleScript. Providers without it
+// (RSS) are simply never asked. It is an optional capability, detected with a type
+// assertion exactly like Stateful, so the core read-only Provider contract is
+// unchanged. Write-back is best-effort: a returned error is surfaced to the user but
+// never rolls back the authoritative local read state.
+type ReadSyncer interface {
+	// SetRead reflects the read flag for the given native ids (Item.NativeID) at the
+	// source. A single toggle passes one id; Mark All Read passes a batch. ids the
+	// provider cannot address are skipped. An empty slice is a no-op.
+	SetRead(ctx context.Context, nativeIDs []string, read bool) error
+}
+
 // Stateful is implemented by providers that carry refreshed sync bookkeeping the
 // caller should persist after a fetch (RSS exposes its updated ETag/Last-Modified
 // via SourceState). Providers without it — Gmail — get a minimal Source recorded

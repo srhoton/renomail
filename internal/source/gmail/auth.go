@@ -22,10 +22,13 @@ import (
 	"github.com/srhoton/renomail/internal/config"
 )
 
-// scope is the single OAuth2 scope renomail requests: read-only Gmail access.
-// Nothing in renomail ever modifies a mailbox, so a broader scope would be an
-// unnecessary grant (DESIGN.md §6.1, §10).
-const scope = gmailapi.GmailReadonlyScope
+// scope is the single OAuth2 scope renomail requests: gmail.modify. renomail reads
+// mail and, when the user marks a message read/unread, writes that one bit back by
+// toggling the UNREAD label (SetRead) — the narrowest scope that permits it. It does
+// not delete, move, or send. Upgrading from the former gmail.readonly grant requires
+// each account to re-run `renomail auth <account>` once; until then writes 403 and
+// SetRead surfaces ErrReauthorize while reads keep working.
+const scope = gmailapi.GmailModifyScope
 
 // ErrNotAuthorized signals that an account has no stored OAuth token yet, so the
 // user must run `renomail auth <account>` once. It is sentinel so callers (the
